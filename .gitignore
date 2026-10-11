@@ -1,0 +1,25 @@
+# Dependencies & environments
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.db
+*.sqlite3
+backend/uploads/
+backend/outputs/
+backend/annotated/
+runs/
+.DS_Store
+
+# Scratch & OS metadata
+scratch/
+Thumbs.db
+*.log
+.vscode/
+.idea/

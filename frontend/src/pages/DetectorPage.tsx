@@ -940,9 +940,19 @@ export const DetectorPage: React.FC = () => {
                             COCKPIT HUD
                           </span>
                         )}
-                        <div className="bg-ink-900/90 text-white px-2.5 py-1 rounded text-caption border border-ink-800 font-mono">
+                        <div className="bg-ink-900/90 text-white px-2.5 py-1 rounded text-caption border border-ink-800 font-mono text-xs">
                           {coordinates.lat.toFixed(4)}, {coordinates.lng.toFixed(4)}
                         </div>
+                        {/* High-visibility Stop button directly inside the video feed overlay */}
+                        <button
+                          type="button"
+                          onClick={stopCamera}
+                          aria-label="Stop live camera stream"
+                          className="pointer-events-auto inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-danger text-white text-caption font-semibold shadow hover:brightness-90 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-danger min-h-[36px]"
+                        >
+                          <Square className="w-3.5 h-3.5 fill-current" />
+                          <span>Stop stream</span>
+                        </button>
                       </div>
                     </div>
                   )}

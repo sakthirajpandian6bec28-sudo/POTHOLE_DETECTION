@@ -74,3 +74,21 @@ The following placeholders represent values that require operational verificatio
 | :--- | :--- | :--- |
 | `{{SUPPORT_PHONE}}` | Contact / support sections | Support phone number |
 | `{{MAP_API_TILES}}` | Map provider custom tile URL (optional fallback) | Custom tile URL if replacing OSM |
+
+## Cloud Deployment & Live Camera Setup
+
+When hosting frontend and backend on cloud services (e.g., Vercel, Netlify, Render, Railway, AWS):
+
+1. **Backend Environment Variables**:
+   - Set `CORS_ORIGINS=*` (or your frontend's cloud domain) in your cloud hosting provider's environment variables.
+   - Set `PORT=8000` (or the port provided by your cloud host).
+   - Ensure `MODEL_PATH=models/best.pt` is deployed alongside the backend.
+
+2. **Frontend Environment Variables**:
+   - Set `VITE_API_URL=https://your-backend.onrender.com` in your frontend hosting settings before building.
+   - If built without `VITE_API_URL`, users can click the **Cloud API** status pill in the Detector header to enter and save the backend URL directly into `localStorage`.
+
+3. **HTTPS & Camera Permissions**:
+   - Mobile browsers (Safari on iOS, Chrome on Android) require **HTTPS** to grant camera and Geolocation permissions.
+   - Insecure HTTP backends will be blocked by modern browsers under **Mixed Content Security Rules** if the frontend is served on HTTPS. Both services should use HTTPS.
+

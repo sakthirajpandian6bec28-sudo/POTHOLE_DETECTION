@@ -4,10 +4,15 @@ import {
   Camera,
   Play,
   Square,
-  Radio,
+  SwitchCamera,
   MapPin,
   ExternalLink,
   Trash2,
+  UploadCloud,
+  Server,
+  Activity,
+  Sliders,
+  Check,
 } from "lucide-react";
 
 import {
@@ -17,9 +22,16 @@ import {
   Input,
   Alert,
   Spinner,
+  EmptyState,
 } from "../components";
 import { detectorContent } from "../config/content/detector";
 import { siteConfig } from "../config/site.config";
+import {
+  getApiBaseUrl,
+  setApiBaseUrl,
+  resetApiBaseUrl,
+  checkApiHealth,
+} from "../config/api";
 
 interface DetectionLogEntry {
   id: string;
@@ -32,18 +44,36 @@ interface DetectionLogEntry {
   savedToDb: boolean;
 }
 
+interface UploadDetection {
+  box: number[];
+  confidence: number;
+  class_name: string;
+  severity: string;
+}
+
+interface UploadResult {
+  filename: string;
+  total_detections: number;
+  detections: UploadDetection[];
+  highest_severity: string | null;
+  inference_time_ms: number;
+  annotated_image_url?: string;
+  saved_pothole_ids?: number[];
+}
+
 export const DetectorPage: React.FC = () => {
+  // Page mode: Live Camera vs Media Upload
+  const [activeTab, setActiveTab] = useState<"camera" | "upload">("camera");
+
   // Camera feed states
   const [isStreaming, setIsStreaming] = useState(false);
-  const [activeTab, setActiveTab] = useState<"browser" | "stream">("browser");
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>("");
-  const [streamUrl, setStreamUrl] = useState<string>("");
-  const [ipFrameBase64, setIpFrameBase64] = useState<string | null>(null);
+  const [facingMode, setFacingMode] = useState<"environment" | "user">("environment");
 
   // Detection parameters
   const [confidenceThreshold, setConfidenceThreshold] = useState<number>(0.25);
-  const [scanInterval, setScanInterval] = useState<number>(400); // ms (~2.5 FPS)
+  const [scanInterval, setScanInterval] = useState<number>(400); // ms
   const [autoLog, setAutoLog] = useState<boolean>(true);
 
   // Vehicle GPS Coordinates
@@ -59,43 +89,87 @@ export const DetectorPage: React.FC = () => {
   const [maxSeverity, setMaxSeverity] = useState<string | null>(null);
   const [isProcessingFrame, setIsProcessingFrame] = useState<boolean>(false);
 
+  // Cloud API Configuration & Health
+  const [currentApiUrl, setCurrentApiUrl] = useState<string>(getApiBaseUrl());
+  const [inputApiUrl, setInputApiUrl] = useState<string>(getApiBaseUrl());
+  const [apiHealth, setApiHealth] = useState<{
+    status: "online" | "offline" | "checking" | "unknown";
+    latency: number;
+    message?: string;
+  }>({ status: "unknown", latency: 0 });
+  const [isConfigOpen, setIsConfigOpen] = useState<boolean>(false);
+
   // Errors and notification
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [apiErrorMessage, setApiErrorMessage] = useState<string | null>(null);
+  const consecutiveErrorsRef = useRef<number>(0);
 
   // Detection event history log
   const [detectionLogs, setDetectionLogs] = useState<DetectionLogEntry[]>([]);
 
-  // Refs
+  // Media upload state
+  const [isAnalyzingFile, setIsAnalyzingFile] = useState<boolean>(false);
+  const [uploadResult, setUploadResult] = useState<UploadResult | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Refs for camera loop
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
-  const timerRef = useRef<number | null>(null);
+  const loopTimeoutRef = useRef<number | null>(null);
   const isStreamingRef = useRef<boolean>(false);
   isStreamingRef.current = isStreaming;
   const isProcessingRef = useRef<boolean>(false);
   const lastLogTimeRef = useRef<number>(0);
 
-  // 1. Enumerate video input devices on mount
-  useEffect(() => {
-    async function loadDevices() {
-      try {
-        if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
-          return;
-        }
-        const devList = await navigator.mediaDevices.enumerateDevices();
-        const videoInputs = devList.filter((d) => d.kind === "videoinput");
-        setDevices(videoInputs);
-        if (videoInputs.length > 0 && !selectedDeviceId) {
-          setSelectedDeviceId(videoInputs[0].deviceId);
-        }
-      } catch (err) {
-        console.warn("Could not enumerate video devices:", err);
-      }
+  // 1. Initial Health Check on API
+  const runHealthCheck = useCallback(async (targetUrl?: string) => {
+    setApiHealth({ status: "checking", latency: 0 });
+    const res = await checkApiHealth(targetUrl);
+    if (res.ok) {
+      setApiHealth({
+        status: "online",
+        latency: res.latencyMs,
+        message: res.message,
+      });
+      setApiErrorMessage(null);
+      consecutiveErrorsRef.current = 0;
+    } else {
+      setApiHealth({
+        status: "offline",
+        latency: res.latencyMs,
+        message: res.message,
+      });
     }
-    loadDevices();
+  }, []);
+
+  useEffect(() => {
+    runHealthCheck(currentApiUrl);
+  }, [currentApiUrl, runHealthCheck]);
+
+  // 2. Enumerate video input devices
+  const enumerateCameras = useCallback(async () => {
+    try {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
+        return;
+      }
+      const devList = await navigator.mediaDevices.enumerateDevices();
+      const videoInputs = devList.filter((d) => d.kind === "videoinput");
+      setDevices(videoInputs);
+      if (videoInputs.length > 0 && !selectedDeviceId) {
+        setSelectedDeviceId(videoInputs[0].deviceId);
+      }
+    } catch (err) {
+      console.warn("Could not enumerate video devices:", err);
+    }
   }, [selectedDeviceId]);
 
-  // 2. Track GPS coordinates using Geolocation API
+  useEffect(() => {
+    enumerateCameras();
+  }, [enumerateCameras]);
+
+  // 3. Track GPS coordinates using Geolocation API
   useEffect(() => {
     if ("geolocation" in navigator) {
       const watchId = navigator.geolocation.watchPosition(
@@ -115,7 +189,7 @@ export const DetectorPage: React.FC = () => {
     }
   }, []);
 
-  // 3. Clear canvas overlays
+  // 4. Clear canvas overlays
   const clearOverlay = useCallback(() => {
     const canvas = canvasRef.current;
     if (canvas) {
@@ -126,33 +200,30 @@ export const DetectorPage: React.FC = () => {
     }
   }, []);
 
-  // 4. Start camera stream
-  const startCamera = async () => {
+  // 5. Start camera stream
+  const startCamera = async (overrideFacingMode?: "environment" | "user") => {
     setErrorMessage(null);
+    setApiErrorMessage(null);
+    consecutiveErrorsRef.current = 0;
+
+    const targetFacing = overrideFacingMode || facingMode;
+
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setErrorMessage(detectorContent.camera.permissionError);
+      return;
+    }
+
+    // Stop existing stream if switching
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach((track) => track.stop());
+      mediaStreamRef.current = null;
+    }
+
     try {
-      if (activeTab === "stream") {
-        let clean = streamUrl.trim();
-        if (!clean) {
-          setErrorMessage("Please enter your phone's IP address (e.g. http://192.168.29.8:8080)");
-          return;
-        }
-        if (!clean.startsWith("http://") && !clean.startsWith("https://") && !clean.startsWith("rtsp://")) {
-          clean = "http://" + clean;
-          setStreamUrl(clean);
-        }
-        setIsStreaming(true);
-        return;
-      }
-
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        setErrorMessage(detectorContent.camera.permissionError);
-        return;
-      }
-
       const constraints: MediaStreamConstraints = {
-        video: selectedDeviceId
+        video: selectedDeviceId && !overrideFacingMode
           ? { deviceId: { exact: selectedDeviceId }, width: { ideal: 1280 }, height: { ideal: 720 } }
-          : { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } },
+          : { facingMode: { ideal: targetFacing }, width: { ideal: 1280 }, height: { ideal: 720 } },
         audio: false,
       };
 
@@ -162,30 +233,30 @@ export const DetectorPage: React.FC = () => {
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         videoRef.current.onloadedmetadata = () => {
-          videoRef.current?.play();
-          setIsStreaming(true);
+          videoRef.current?.play().then(() => {
+            setIsStreaming(true);
+            enumerateCameras();
+          });
         };
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       if (window.location.protocol === "http:" && window.location.hostname !== "localhost") {
-        setErrorMessage(
-          `Mobile Camera requires HTTPS: Please visit https://${window.location.host} on your phone, accept the SSL certificate, and grant camera permissions.`
-        );
+        setErrorMessage(detectorContent.camera.httpsNotice);
       } else {
         setErrorMessage(
-          `${detectorContent.camera.permissionError} (${msg}). If blocked, tap the lock or settings icon in your mobile browser URL bar and set Camera to 'Allow'.`
+          `${detectorContent.camera.permissionError} (${msg}). Please allow camera access in browser site settings.`
         );
       }
       setIsStreaming(false);
     }
   };
 
-  // 5. Stop camera stream
+  // 6. Stop camera stream
   const stopCamera = useCallback(() => {
-    if (timerRef.current) {
-      window.clearInterval(timerRef.current);
-      timerRef.current = null;
+    if (loopTimeoutRef.current) {
+      window.clearTimeout(loopTimeoutRef.current);
+      loopTimeoutRef.current = null;
     }
 
     if (mediaStreamRef.current) {
@@ -198,7 +269,6 @@ export const DetectorPage: React.FC = () => {
     }
 
     setIsStreaming(false);
-    setIpFrameBase64(null);
     setActivePotholesCount(0);
     setMaxSeverity(null);
     clearOverlay();
@@ -211,7 +281,16 @@ export const DetectorPage: React.FC = () => {
     };
   }, [stopCamera]);
 
-  // 6. Draw bounding boxes on canvas overlay
+  // 7. Toggle between rear environment camera and front selfie camera
+  const toggleFacingMode = () => {
+    const nextMode = facingMode === "environment" ? "user" : "environment";
+    setFacingMode(nextMode);
+    if (isStreaming) {
+      startCamera(nextMode);
+    }
+  };
+
+  // 8. Draw bounding boxes on canvas overlay
   const renderDetections = useCallback(
     (
       detections: Array<{
@@ -240,10 +319,10 @@ export const DetectorPage: React.FC = () => {
 
         // Read semantic severity colors directly from CSS tokens
         const rootStyle = getComputedStyle(document.documentElement);
-        const colorLow = rootStyle.getPropertyValue("--color-sev-low").trim();
-        const colorMed = rootStyle.getPropertyValue("--color-sev-medium").trim();
-        const colorHigh = rootStyle.getPropertyValue("--color-sev-high").trim();
-        const colorInk900 = rootStyle.getPropertyValue("--color-ink-900").trim();
+        const colorLow = rootStyle.getPropertyValue("--color-sev-low").trim() || "#15803D";
+        const colorMed = rootStyle.getPropertyValue("--color-sev-medium").trim() || "#D97706";
+        const colorHigh = rootStyle.getPropertyValue("--color-sev-high").trim() || "#DC2626";
+        const colorInk900 = rootStyle.getPropertyValue("--color-ink-900").trim() || "#0B1220";
 
         let strokeColor = colorLow;
         let bgColor = "rgba(220, 252, 231, 0.95)";
@@ -281,111 +360,29 @@ export const DetectorPage: React.FC = () => {
     []
   );
 
-  // 7. Capture single frame from video or IP stream and send to backend
+  // 9. Process single live video frame (Adaptive Loop - No Swallowed Errors)
   const processLiveFrame = useCallback(async () => {
     if (!isStreamingRef.current || isProcessingRef.current) {
       return;
     }
 
-    // Branch A: Hardware IP Camera Stream
-    if (activeTab === "stream") {
-      if (!streamUrl || !streamUrl.trim()) return;
-
-      isProcessingRef.current = true;
-      setIsProcessingFrame(true);
-
-      try {
-        const nowMs = Date.now();
-        const shouldLogToDb = autoLog && nowMs - lastLogTimeRef.current > 3000;
-        const apiUrl = import.meta.env.VITE_API_URL || "http://localhost:8000";
-
-        const response = await fetch(`${apiUrl}/api/detect/ip-stream`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            stream_url: streamUrl.trim(),
-            confidence_threshold: confidenceThreshold,
-            latitude: coordinates.lat,
-            longitude: coordinates.lng,
-            auto_log: shouldLogToDb,
-          }),
-        });
-
-        if (!response.ok) {
-          const errJson = await response.json().catch(() => ({}));
-          throw new Error(
-            errJson.error?.message ||
-              `Could not connect to camera stream at '${streamUrl}'. Please check: 1) IP Webcam app is open and 'Start Server' is running. 2) Keep the phone screen ON. 3) Phone and computer are on the same Wi-Fi.`
-          );
-        }
-
-        const result = await response.json();
-        setLatencyMs(result.inference_time_ms);
-        setActivePotholesCount(result.total_detections);
-        setMaxSeverity(result.highest_severity);
-        setIpFrameBase64(result.frame_base64);
-
-        if (shouldLogToDb && result.total_detections > 0) {
-          lastLogTimeRef.current = nowMs;
-        }
-
-        // Render detections on canvas overlay
-        const img = new Image();
-        img.onload = () => {
-          renderDetections(result.detections, img.naturalWidth || 640, img.naturalHeight || 480);
-        };
-        img.src = result.frame_base64;
-
-        if (result.total_detections > 0) {
-          const timeStr = new Date().toLocaleTimeString();
-          setDetectionLogs((prev) => [
-            {
-              id: `${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
-              timestamp: timeStr,
-              count: result.total_detections,
-              maxSeverity: result.highest_severity || "low",
-              confidence: Math.max(...result.detections.map((d: { confidence: number }) => d.confidence)),
-              latitude: coordinates.lat,
-              longitude: coordinates.lng,
-              savedToDb: shouldLogToDb,
-            },
-            ...prev.slice(0, 24),
-          ]);
-        }
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        setErrorMessage(msg);
-        stopCamera();
-      } finally {
-        isProcessingRef.current = false;
-        setIsProcessingFrame(false);
+    const video = videoRef.current;
+    if (!video || video.readyState < 2 || video.videoWidth === 0 || video.videoHeight === 0) {
+      // Schedule next check if video is not ready yet
+      if (isStreamingRef.current) {
+        loopTimeoutRef.current = window.setTimeout(processLiveFrame, scanInterval);
       }
-      return;
-    }
-
-    // Branch B: Local webcam / browser media stream
-    let sourceW = 0;
-    let sourceH = 0;
-    let sourceElement: CanvasImageSource | null = null;
-
-    if (activeTab === "browser" && videoRef.current) {
-      const video = videoRef.current;
-      if (video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0) {
-        sourceW = video.videoWidth;
-        sourceH = video.videoHeight;
-        sourceElement = video;
-      }
-    }
-
-    if (!sourceElement || sourceW === 0 || sourceH === 0) {
       return;
     }
 
     isProcessingRef.current = true;
     setIsProcessingFrame(true);
 
+    const sourceW = video.videoWidth;
+    const sourceH = video.videoHeight;
+
     try {
-      // High-performance downscale to max 640px dimension for ultra-low latency inference
+      // Downscale to max 640px for low-latency network transfer over cloud
       const maxDim = 640;
       const scale = Math.min(1, maxDim / Math.max(sourceW, sourceH));
       const targetW = Math.round(sourceW * scale);
@@ -397,28 +394,22 @@ export const DetectorPage: React.FC = () => {
       const ctx = offscreen.getContext("2d");
       if (!ctx) return;
 
-      ctx.drawImage(sourceElement, 0, 0, targetW, targetH);
+      ctx.drawImage(video, 0, 0, targetW, targetH);
+      const frameBase64 = offscreen.toDataURL("image/jpeg", 0.65);
 
-      let frameBase64: string;
-      try {
-        frameBase64 = offscreen.toDataURL("image/jpeg", 0.65);
-      } catch (canvasErr: unknown) {
-        const msg = canvasErr instanceof Error ? canvasErr.message : String(canvasErr);
-        if (msg.includes("Tainted") || msg.includes("SecurityError")) {
-          setErrorMessage(
-            "CORS Access Restricted: The camera stream does not permit reading video frames. On your phone app, enable 'CORS / Access-Control-Allow-Origin', or connect using 'Connected hardware camera' directly from your phone."
-          );
-          setIsStreaming(false);
-          return;
-        }
-        throw canvasErr;
-      }
-
-      // Throttle database logging to once every 3 seconds
       const nowMs = Date.now();
       const shouldLogToDb = autoLog && nowMs - lastLogTimeRef.current > 3000;
+      const apiUrl = getApiBaseUrl();
 
-      const apiUrl = import.meta.env.VITE_API_URL || "http://localhost:8000";
+      // Check mixed content before network attempt
+      if (window.location.protocol === "https:" && apiUrl.startsWith("http://")) {
+        setApiErrorMessage(detectorContent.cloudApi.mixedContentWarning);
+        return;
+      }
+
+      const controller = new AbortController();
+      const fetchTimer = setTimeout(() => controller.abort(), 6000);
+
       const response = await fetch(`${apiUrl}/api/detect/frame`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -429,14 +420,23 @@ export const DetectorPage: React.FC = () => {
           longitude: coordinates.lng,
           auto_log: shouldLogToDb,
         }),
+        signal: controller.signal,
       });
+      clearTimeout(fetchTimer);
 
       if (!response.ok) {
         const errJson = await response.json().catch(() => ({}));
-        throw new Error(errJson.error?.message || "Frame detection request failed");
+        throw new Error(errJson.error?.message || `HTTP ${response.status} from detection API`);
       }
 
       const result = await response.json();
+
+      // Clear consecutive error count on successful inference
+      consecutiveErrorsRef.current = 0;
+      if (apiErrorMessage) setApiErrorMessage(null);
+      if (apiHealth.status !== "online") {
+        setApiHealth({ status: "online", latency: result.inference_time_ms });
+      }
 
       setLatencyMs(result.inference_time_ms);
       setActivePotholesCount(result.total_detections);
@@ -446,7 +446,7 @@ export const DetectorPage: React.FC = () => {
         lastLogTimeRef.current = nowMs;
       }
 
-      // Scale coordinates back to original video dimensions for pixel-perfect overlay
+      // Scale coordinates back to original video dimensions
       const scaleBackX = sourceW / targetW;
       const scaleBackY = sourceH / targetH;
       const scaledDetections = result.detections.map((det: {
@@ -485,40 +485,163 @@ export const DetectorPage: React.FC = () => {
         ]);
       }
     } catch (err: unknown) {
-      console.warn("Live frame processing error:", err);
+      consecutiveErrorsRef.current += 1;
+      const msg = err instanceof Error ? err.message : String(err);
+
+      // Rule 4: Visible error banner if consecutive requests fail
+      if (consecutiveErrorsRef.current >= 3) {
+        const targetUrl = getApiBaseUrl() || window.location.origin;
+        setApiErrorMessage(
+          `Cloud detection API unreachable at '${targetUrl}': ${msg}. Verify your hosted backend service is running, VITE_API_URL is configured, and CORS is enabled.`
+        );
+        setApiHealth({ status: "offline", latency: 0, message: msg });
+      }
     } finally {
       isProcessingRef.current = false;
       setIsProcessingFrame(false);
+
+      // Adaptive loop: schedule next frame only after previous one finishes
+      if (isStreamingRef.current) {
+        loopTimeoutRef.current = window.setTimeout(processLiveFrame, scanInterval);
+      }
     }
   }, [
-    activeTab,
+    autoLog,
     confidenceThreshold,
     coordinates.lat,
     coordinates.lng,
-    autoLog,
+    scanInterval,
     renderDetections,
+    apiErrorMessage,
+    apiHealth.status,
   ]);
 
-  // 8. Recurring interval scanning loop
+  // Trigger loop on isStreaming change
   useEffect(() => {
     if (isStreaming) {
-      timerRef.current = window.setInterval(() => {
-        processLiveFrame();
-      }, scanInterval);
+      processLiveFrame();
     } else {
-      if (timerRef.current) {
-        window.clearInterval(timerRef.current);
-        timerRef.current = null;
+      if (loopTimeoutRef.current) {
+        window.clearTimeout(loopTimeoutRef.current);
+        loopTimeoutRef.current = null;
       }
     }
-
     return () => {
-      if (timerRef.current) {
-        window.clearInterval(timerRef.current);
-        timerRef.current = null;
+      if (loopTimeoutRef.current) {
+        window.clearTimeout(loopTimeoutRef.current);
+        loopTimeoutRef.current = null;
       }
     };
-  }, [isStreaming, scanInterval, processLiveFrame]);
+  }, [isStreaming, processLiveFrame]);
+
+  // 10. Handle Road Media File Upload Inspection
+  const handleFileUpload = async (file: File) => {
+    setUploadError(null);
+    setUploadResult(null);
+    setIsAnalyzingFile(true);
+
+    const apiUrl = getApiBaseUrl();
+    const formData = new FormData();
+    formData.append("file", file);
+    formData.append("confidence", String(confidenceThreshold));
+
+    try {
+      const response = await fetch(`${apiUrl}/api/detect`, {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const errJson = await response.json().catch(() => ({}));
+        throw new Error(errJson.error?.message || `HTTP ${response.status} during media analysis`);
+      }
+
+      const result = await response.json();
+      setUploadResult({
+        filename: file.name,
+        total_detections: result.total_detections,
+        detections: result.detections,
+        highest_severity: result.highest_severity,
+        inference_time_ms: result.inference_time_ms,
+        annotated_image_url: result.annotated_image_url
+          ? (result.annotated_image_url.startsWith("http")
+              ? result.annotated_image_url
+              : `${apiUrl}${result.annotated_image_url}`)
+          : undefined,
+      });
+
+      if (result.total_detections > 0) {
+        const timeStr = new Date().toLocaleTimeString();
+        setDetectionLogs((prev) => [
+          {
+            id: `${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+            timestamp: timeStr,
+            count: result.total_detections,
+            maxSeverity: result.highest_severity || "low",
+            confidence: Math.max(...result.detections.map((d: UploadDetection) => d.confidence)),
+            latitude: coordinates.lat,
+            longitude: coordinates.lng,
+            savedToDb: false,
+          },
+          ...prev.slice(0, 24),
+        ]);
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setUploadError(msg);
+    } finally {
+      setIsAnalyzingFile(false);
+    }
+  };
+
+  // 11. Save uploaded detections to GIS Database
+  const logUploadToDatabase = async () => {
+    if (!uploadResult || uploadResult.detections.length === 0) return;
+
+    const apiUrl = getApiBaseUrl();
+    try {
+      for (const det of uploadResult.detections) {
+        await fetch(`${apiUrl}/api/potholes`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            latitude: coordinates.lat,
+            longitude: coordinates.lng,
+            confidence: det.confidence,
+            severity: det.severity,
+            class_name: det.class_name,
+            box_x1: det.box[0],
+            box_y1: det.box[1],
+            box_x2: det.box[2],
+            box_y2: det.box[3],
+            notes: `Inspected from uploaded road file: ${uploadResult.filename}`,
+          }),
+        });
+      }
+      alert(`Successfully saved ${uploadResult.detections.length} road hazard record(s) to GIS map database.`);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      alert(`Could not save detections: ${msg}`);
+    }
+  };
+
+  // 12. Save custom API Endpoint URL
+  const handleSaveApiUrl = () => {
+    const clean = inputApiUrl.trim();
+    setApiBaseUrl(clean);
+    setCurrentApiUrl(clean);
+    setIsConfigOpen(false);
+    runHealthCheck(clean);
+  };
+
+  const handleResetApiUrl = () => {
+    resetApiBaseUrl();
+    const defaultUrl = getApiBaseUrl();
+    setInputApiUrl(defaultUrl);
+    setCurrentApiUrl(defaultUrl);
+    setIsConfigOpen(false);
+    runHealthCheck(defaultUrl);
+  };
 
   return (
     <div className="w-full flex flex-col">
@@ -528,7 +651,7 @@ export const DetectorPage: React.FC = () => {
           <div className="flex flex-col md:flex-row md:items-end justify-between gap-6">
             <div className="space-y-2 max-w-3xl">
               <span className="text-caption font-semibold tracking-wider uppercase text-accent-400 block">
-                ROAD HAZARD AI &bull; LIVE SENSOR STREAM
+                {detectorContent.header.badgeLabel}
               </span>
               <h1 className="text-h1-mobile md:text-h1 font-semibold text-white tracking-tight">
                 {detectorContent.header.title}
@@ -537,16 +660,35 @@ export const DetectorPage: React.FC = () => {
                 {detectorContent.header.description}
               </p>
             </div>
-            <div className="flex items-center gap-3 shrink-0">
-              {isStreaming ? (
-                <Badge variant="severity-low" dot>
-                  {detectorContent.camera.statusLive}
-                </Badge>
-              ) : (
-                <Badge variant="neutral" dot>
-                  {detectorContent.camera.statusStandby}
-                </Badge>
-              )}
+
+            {/* Quick Actions & Cloud API Pill */}
+            <div className="flex flex-wrap items-center gap-3 shrink-0">
+              {/* Cloud API Connection Indicator Pill */}
+              <button
+                type="button"
+                onClick={() => setIsConfigOpen(true)}
+                className="flex items-center gap-2 px-3 py-1.5 rounded bg-ink-900/80 border border-ink-800 text-caption font-medium hover:border-accent-400 transition-colors"
+                title="Click to view or edit backend cloud API URL"
+              >
+                <div
+                  className={`w-2 h-2 rounded-full ${
+                    apiHealth.status === "online"
+                      ? "bg-sev-low animate-pulse"
+                      : apiHealth.status === "checking"
+                      ? "bg-sev-medium"
+                      : "bg-danger"
+                  }`}
+                />
+                <span className="font-mono text-slate-200">
+                  {apiHealth.status === "online"
+                    ? `${detectorContent.cloudApi.statusOnline} (${apiHealth.latency}ms)`
+                    : apiHealth.status === "checking"
+                    ? detectorContent.cloudApi.statusChecking
+                    : detectorContent.cloudApi.statusOffline}
+                </span>
+                <Sliders className="w-3.5 h-3.5 text-accent-400 ml-1" />
+              </button>
+
               <Link to="/map">
                 <Button variant="secondary" size="sm" rightIcon={<ExternalLink className="w-4 h-4" />}>
                   View GIS map
@@ -557,22 +699,35 @@ export const DetectorPage: React.FC = () => {
         </div>
       </section>
 
-      {/* Main Content Area */}
+      {/* Main Content Body */}
       <div className="max-w-content mx-auto w-full px-4 md:px-6 py-8 md:py-12 space-y-8">
-        {/* Visible Error Banner if any */}
+        {/* Visible Error Banner if camera fails */}
         {errorMessage && (
           <Alert
             variant="error"
-            title="Camera connection error"
+            title="Camera initialization notice"
             actionText="Retry camera initialization"
-            onAction={startCamera}
+            onAction={() => startCamera()}
             onClose={() => setErrorMessage(null)}
           >
             {errorMessage}
           </Alert>
         )}
 
-        {/* Telemetry Indicator Row with primary-50 rounded squares and primary-600 icons */}
+        {/* Visible Alert Banner if Cloud API is Unreachable */}
+        {apiErrorMessage && (
+          <Alert
+            variant="error"
+            title="Cloud detection service unreachable"
+            actionText="Configure API server"
+            onAction={() => setIsConfigOpen(true)}
+            onClose={() => setApiErrorMessage(null)}
+          >
+            {apiErrorMessage}
+          </Alert>
+        )}
+
+        {/* Telemetry Metric KPI Cards */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           <Card padding="sm">
             <div className="flex items-center justify-between">
@@ -580,11 +735,15 @@ export const DetectorPage: React.FC = () => {
                 {detectorContent.telemetry.activeCountTitle}
               </span>
               <div className="w-8 h-8 rounded bg-primary-50 flex items-center justify-center text-primary-600 shrink-0">
-                <Radio className="w-4 h-4" aria-hidden="true" />
+                <Activity className="w-4 h-4" aria-hidden="true" />
               </div>
             </div>
             <span className="text-h3 font-semibold text-ink-900 mt-2 block">
-              {activePotholesCount}
+              {activeTab === "camera"
+                ? activePotholesCount
+                : uploadResult
+                ? uploadResult.total_detections
+                : 0}
             </span>
           </Card>
 
@@ -610,6 +769,18 @@ export const DetectorPage: React.FC = () => {
                 >
                   {maxSeverity.toUpperCase()}
                 </Badge>
+              ) : uploadResult?.highest_severity ? (
+                <Badge
+                  variant={
+                    uploadResult.highest_severity === "high"
+                      ? "severity-high"
+                      : uploadResult.highest_severity === "medium"
+                      ? "severity-medium"
+                      : "severity-low"
+                  }
+                >
+                  {uploadResult.highest_severity.toUpperCase()}
+                </Badge>
               ) : (
                 <span className="text-small text-text-muted">None</span>
               )}
@@ -626,7 +797,11 @@ export const DetectorPage: React.FC = () => {
               </div>
             </div>
             <span className="text-h3 font-semibold text-ink-900 mt-2 block">
-              {latencyMs > 0 ? `${latencyMs}ms` : "\u2014"}
+              {latencyMs > 0
+                ? `${latencyMs}ms`
+                : uploadResult
+                ? `${uploadResult.inference_time_ms}ms`
+                : "\u2014"}
             </span>
           </Card>
 
@@ -647,14 +822,50 @@ export const DetectorPage: React.FC = () => {
           </Card>
         </div>
 
-        {/* Main Live Detection Studio Viewport */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-          {/* Left Column: Live Video Canvas Monitor (Span 2) */}
-          <div className="lg:col-span-2 space-y-4">
-            <div className="rounded border border-border-default shadow-card overflow-hidden bg-ink-900 relative">
-              <div className="relative aspect-video w-full flex items-center justify-center bg-ink-900 overflow-hidden">
-                {/* Underlying Video Stream for browser webcam */}
-                {activeTab === "browser" && (
+        {/* Tab Selection Header (Live Camera vs Upload Inspection) */}
+        <div className="border-b border-border-default flex gap-6">
+          <button
+            type="button"
+            onClick={() => {
+              if (activeTab !== "camera") setActiveTab("camera");
+            }}
+            className={`pb-3 text-body font-medium border-b-2 transition-colors flex items-center gap-2 ${
+              activeTab === "camera"
+                ? "border-primary-600 text-primary-600 font-semibold"
+                : "border-transparent text-text-muted hover:text-ink-900"
+            }`}
+          >
+            <Camera className="w-5 h-5" />
+            <span>{detectorContent.camera.hardwareTabBrowser}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              if (activeTab !== "upload") {
+                stopCamera();
+                setActiveTab("upload");
+              }
+            }}
+            className={`pb-3 text-body font-medium border-b-2 transition-colors flex items-center gap-2 ${
+              activeTab === "upload"
+                ? "border-primary-600 text-primary-600 font-semibold"
+                : "border-transparent text-text-muted hover:text-ink-900"
+            }`}
+          >
+            <UploadCloud className="w-5 h-5" />
+            <span>{detectorContent.upload.tabTitle}</span>
+          </button>
+        </div>
+
+        {/* Mode 1: LIVE VEHICLE CAMERA STUDIO */}
+        {activeTab === "camera" && (
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+            {/* Left 2 Cols: Live Video HUD Viewport */}
+            <div className="lg:col-span-2 space-y-4">
+              <div className="rounded border border-border-default shadow-card overflow-hidden bg-ink-900 relative">
+                <div className="relative aspect-video w-full flex items-center justify-center bg-ink-900 overflow-hidden">
+                  {/* Camera Video Stream */}
                   <video
                     ref={videoRef}
                     playsInline
@@ -662,290 +873,375 @@ export const DetectorPage: React.FC = () => {
                     autoPlay
                     className={`w-full h-full object-contain ${isStreaming ? "block" : "hidden"}`}
                   />
-                )}
 
-                {/* Underlying Image Stream for IP camera */}
-                {activeTab === "stream" && (
-                  <img
-                    src={isStreaming && ipFrameBase64 ? ipFrameBase64 : undefined}
-                    alt="IP Camera Live Feed"
-                    className={`w-full h-full object-contain ${isStreaming && ipFrameBase64 ? "block" : "hidden"}`}
+                  {/* Canvas Overlay for YOLO Bounding Boxes */}
+                  <canvas
+                    ref={canvasRef}
+                    className={`absolute inset-0 w-full h-full object-contain pointer-events-none ${
+                      isStreaming ? "block" : "hidden"
+                    }`}
                   />
-                )}
 
-                {/* Real-time Bounding Box Canvas Overlay */}
-                <canvas
-                  ref={canvasRef}
-                  className={`absolute inset-0 w-full h-full object-contain pointer-events-none ${
-                    isStreaming ? "block" : "hidden"
-                  }`}
-                />
+                  {/* Standby View (When Camera is Inactive) */}
+                  {!isStreaming && (
+                    <div className="text-center p-8 space-y-4 text-white">
+                      <div className="w-16 h-16 rounded-full bg-ink-800 border border-ink-800 flex items-center justify-center mx-auto text-accent-400">
+                        <Camera className="w-8 h-8" aria-hidden="true" />
+                      </div>
+                      <div className="max-w-md mx-auto">
+                        <h3 className="text-h4 font-medium text-white">
+                          {detectorContent.camera.title}
+                        </h3>
+                        <p className="text-small text-slate-300 mt-1">
+                          {detectorContent.camera.subtitle}
+                        </p>
+                      </div>
+                      <div className="pt-2 flex flex-wrap items-center justify-center gap-3">
+                        <Button
+                          variant="primary"
+                          size="lg"
+                          leftIcon={<Play className="w-5 h-5" />}
+                          onClick={() => startCamera()}
+                        >
+                          {detectorContent.camera.startCameraText}
+                        </Button>
+                      </div>
+                    </div>
+                  )}
 
-                {/* Inactive Standby View */}
-                {!isStreaming && (
-                  <div className="text-center p-8 space-y-4 text-white">
-                    <div className="w-16 h-16 rounded-full bg-ink-800 border border-ink-800 flex items-center justify-center mx-auto text-accent-400">
-                      <Camera className="w-8 h-8" aria-hidden="true" />
-                    </div>
-                    <div className="max-w-md mx-auto">
-                      <h3 className="text-h4 font-medium text-white">
-                        {detectorContent.camera.title}
-                      </h3>
-                      <p className="text-small text-slate-300 mt-1">
-                        {detectorContent.camera.subtitle}
-                      </p>
-                    </div>
-                    <div className="pt-2">
-                      <Button
-                        variant="primary"
-                        size="lg"
-                        leftIcon={<Play className="w-5 h-5" />}
-                        onClick={startCamera}
-                      >
-                        {detectorContent.camera.startCameraText}
-                      </Button>
-                    </div>
-                  </div>
-                )}
+                  {/* Telemetry HUD Overlay (When Camera is Active) */}
+                  {isStreaming && (
+                    <div className="absolute top-3 left-3 right-3 flex items-center justify-between pointer-events-none">
+                      <div className="flex items-center gap-2">
+                        <Badge variant="severity-low" dot>
+                          {detectorContent.camera.statusLive}
+                        </Badge>
+                        {isProcessingFrame && (
+                          <div className="flex items-center gap-1.5 bg-ink-900/90 text-white px-2 py-0.5 rounded text-caption border border-ink-800">
+                            <Spinner size="sm" className="text-primary-600" />
+                            <span>{detectorContent.camera.statusScanning}</span>
+                          </div>
+                        )}
+                      </div>
 
-                {/* Stream Telemetry Overlay Header */}
-                {isStreaming && (
-                  <div className="absolute top-3 left-3 right-3 flex items-center justify-between pointer-events-none">
-                    <div className="flex items-center gap-2">
-                      <Badge variant="severity-low" dot>
-                        LIVE FEED
-                      </Badge>
-                      {isProcessingFrame && (
-                        <div className="flex items-center gap-1.5 bg-ink-900/90 text-white px-2 py-0.5 rounded text-caption border border-ink-800">
-                          <Spinner size="sm" className="text-primary-600" />
-                          <span>Scanning</span>
+                      <div className="flex items-center gap-2">
+                        <div className="bg-ink-900/90 text-white px-2.5 py-1 rounded text-caption border border-ink-800 font-mono">
+                          {coordinates.lat.toFixed(4)}, {coordinates.lng.toFixed(4)}
                         </div>
-                      )}
+                      </div>
                     </div>
-                    <div className="bg-ink-900/90 text-white px-2.5 py-1 rounded text-caption border border-ink-800 font-mono">
-                      {coordinates.lat.toFixed(4)}, {coordinates.lng.toFixed(4)}
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* Bottom Monitor Control Toolbar */}
-              <div className="p-4 bg-bg-surface border-t border-border-default flex flex-wrap items-center justify-between gap-4">
-                <div className="flex items-center gap-3">
-                  {isStreaming ? (
-                    <Button
-                      variant="danger"
-                      size="md"
-                      leftIcon={<Square className="w-4 h-4" />}
-                      onClick={stopCamera}
-                    >
-                      {detectorContent.camera.stopCameraText}
-                    </Button>
-                  ) : (
-                    <Button
-                      variant="primary"
-                      size="md"
-                      leftIcon={<Play className="w-4 h-4" />}
-                      onClick={startCamera}
-                    >
-                      {detectorContent.camera.startCameraText}
-                    </Button>
                   )}
                 </div>
 
-                <div className="flex items-center gap-3">
-                  <label className="flex items-center gap-2 cursor-pointer select-none text-small font-medium text-ink-800">
-                    <input
-                      type="checkbox"
-                      checked={autoLog}
-                      onChange={(e) => setAutoLog(e.target.checked)}
-                      className="w-4 h-4 text-primary-600 rounded border-border-default focus:ring-primary-600"
-                    />
-                    <span>{detectorContent.camera.autoLogLabel}</span>
-                  </label>
+                {/* Bottom Viewport Control Toolbar */}
+                <div className="p-4 bg-bg-surface border-t border-border-default flex flex-wrap items-center justify-between gap-4">
+                  <div className="flex items-center gap-3">
+                    {isStreaming ? (
+                      <Button
+                        variant="danger"
+                        size="md"
+                        leftIcon={<Square className="w-4 h-4" />}
+                        onClick={stopCamera}
+                      >
+                        {detectorContent.camera.stopCameraText}
+                      </Button>
+                    ) : (
+                      <Button
+                        variant="primary"
+                        size="md"
+                        leftIcon={<Play className="w-4 h-4" />}
+                        onClick={() => startCamera()}
+                      >
+                        {detectorContent.camera.startCameraText}
+                      </Button>
+                    )}
+
+                    {/* Camera Flip / Switch Button */}
+                    <Button
+                      variant="secondary"
+                      size="md"
+                      leftIcon={<SwitchCamera className="w-4 h-4" />}
+                      onClick={toggleFacingMode}
+                      title="Switch between rear road camera and front camera"
+                    >
+                      {detectorContent.camera.switchCameraText} (
+                      {facingMode === "environment" ? "Rear" : "Front"})
+                    </Button>
+                  </div>
+
+                  <div className="flex items-center gap-3">
+                    <label className="flex items-center gap-2 cursor-pointer select-none text-small font-medium text-ink-800">
+                      <input
+                        type="checkbox"
+                        checked={autoLog}
+                        onChange={(e) => setAutoLog(e.target.checked)}
+                        className="w-4 h-4 text-primary-600 rounded border-border-default focus:ring-primary-600"
+                      />
+                      <span>{detectorContent.camera.autoLogLabel}</span>
+                    </label>
+                  </div>
                 </div>
               </div>
             </div>
-          </div>
 
-          {/* Right Column: Hardware & Stream Configuration Settings */}
-          <div className="space-y-6">
-            <Card title="Hardware camera settings" subtitle="Input devices and sensor calibration">
-              <div className="space-y-5">
-                {/* Hardware Input Tabs */}
-                <div className="border-b border-border-default flex gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setActiveTab("browser")}
-                    className={`pb-2.5 text-small font-medium border-b-2 transition-colors ${
-                      activeTab === "browser"
-                        ? "border-primary-600 text-primary-600 font-semibold"
-                        : "border-transparent text-text-muted hover:text-ink-900"
-                    }`}
-                  >
-                    {detectorContent.camera.hardwareTabBrowser}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setActiveTab("stream")}
-                    className={`pb-2.5 text-small font-medium border-b-2 transition-colors ${
-                      activeTab === "stream"
-                        ? "border-primary-600 text-primary-600 font-semibold"
-                        : "border-transparent text-text-muted hover:text-ink-900"
-                    }`}
-                  >
-                    {detectorContent.camera.hardwareTabStream}
-                  </button>
-                </div>
-
-                {/* Tab 1: Connected Video Devices */}
-                {activeTab === "browser" ? (
-                  <div className="space-y-4">
-                    <div>
-                      <label className="block text-small font-medium text-ink-800 mb-1.5">
-                        {detectorContent.camera.deviceSelectLabel}
-                      </label>
-                      <select
-                        value={selectedDeviceId}
-                        disabled={isStreaming}
-                        onChange={(e) => setSelectedDeviceId(e.target.value)}
-                        className="w-full min-h-[44px] rounded border border-border-default bg-bg-surface px-3 text-body text-ink-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-600 disabled:bg-bg-page disabled:text-text-muted disabled:cursor-not-allowed"
-                      >
-                        {devices.length === 0 && (
-                          <option value="">{detectorContent.camera.deviceDefaultOption}</option>
-                        )}
-                        {devices.map((device, idx) => (
-                          <option key={device.deviceId || idx} value={device.deviceId}>
-                            {device.label || `Camera ${idx + 1}`}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
+            {/* Right Column: Camera & Sensor Parameters */}
+            <div className="space-y-6">
+              <Card title="Sensor & vehicle calibration" subtitle="Live stream parameters and GPS positioning">
+                <div className="space-y-5">
+                  {/* Video Input Device Picker */}
+                  <div>
+                    <label className="block text-small font-medium text-ink-800 mb-1.5">
+                      {detectorContent.camera.deviceSelectLabel}
+                    </label>
+                    <select
+                      value={selectedDeviceId}
+                      disabled={isStreaming}
+                      onChange={(e) => {
+                        setSelectedDeviceId(e.target.value);
+                      }}
+                      className="w-full min-h-[44px] rounded border border-border-default bg-bg-surface px-3 text-body text-ink-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-600 disabled:bg-bg-page disabled:text-text-muted disabled:cursor-not-allowed"
+                    >
+                      {devices.length === 0 && (
+                        <option value="">{detectorContent.camera.deviceDefaultOption}</option>
+                      )}
+                      {devices.map((device, idx) => (
+                        <option key={device.deviceId || idx} value={device.deviceId}>
+                          {device.label || `Camera ${idx + 1}`}
+                        </option>
+                      ))}
+                    </select>
                   </div>
-                ) : (
-                  /* Tab 2: Hardware Network Stream */
-                  <div className="space-y-4">
-                    <Input
-                      label={detectorContent.camera.streamUrlLabel}
-                      placeholder="http://192.168.1.100:8080/video"
-                      value={streamUrl}
-                      onChange={(e) => setStreamUrl(e.target.value)}
-                      helperText="Install 'IP Webcam' on Android or 'IP Camera' on iOS, tap 'Start Server', and paste the video URL."
-                      leftIcon={<Radio className="w-4 h-4" />}
+
+                  {/* Confidence Slider */}
+                  <div className="space-y-2 pt-2 border-t border-border-default">
+                    <div className="flex items-center justify-between text-small">
+                      <span className="font-medium text-ink-800">
+                        {detectorContent.camera.confidenceLabel}
+                      </span>
+                      <span className="font-mono text-ink-900 font-semibold">
+                        {Math.round(confidenceThreshold * 100)}%
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0.10"
+                      max="0.90"
+                      step="0.05"
+                      value={confidenceThreshold}
+                      onChange={(e) => setConfidenceThreshold(parseFloat(e.target.value))}
+                      className="w-full accent-primary-600 h-2 bg-border-default rounded cursor-pointer"
                     />
-                    <div className="bg-primary-50 border border-primary-100 rounded p-3 text-caption text-ink-800 space-y-1">
-                      <span className="font-semibold block text-primary-700">Direct Mobile Option:</span>
-                      <p>
-                        You can also open this webpage directly on your mobile phone browser at{" "}
-                        <span className="font-mono font-semibold text-ink-900 bg-bg-surface px-1 py-0.5 rounded border border-border-default">
-                          https://192.168.29.11:5173
-                        </span>{" "}
-                        (same Wi-Fi) to stream using your phone's rear camera and built-in vehicle GPS!
-                      </p>
+                  </div>
+
+                  {/* Scan Rate Sensitivity */}
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between text-small">
+                      <span className="font-medium text-ink-800">
+                        {detectorContent.camera.intervalLabel}
+                      </span>
+                      <span className="font-mono text-ink-900 font-semibold">
+                        {scanInterval}ms (~{(1000 / scanInterval).toFixed(1)} FPS)
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-3 gap-2">
+                      {[250, 400, 800].map((ms) => (
+                        <button
+                          key={ms}
+                          type="button"
+                          onClick={() => setScanInterval(ms)}
+                          className={`min-h-[44px] rounded border text-small font-medium transition-colors ${
+                            scanInterval === ms
+                              ? "border-primary-600 bg-primary-50 text-primary-600 font-semibold"
+                              : "border-border-default bg-bg-surface text-text-body hover:bg-primary-50"
+                          }`}
+                        >
+                          {ms === 250 ? "Fast (250ms)" : ms === 400 ? "Balanced" : "Eco (800ms)"}
+                        </button>
+                      ))}
                     </div>
                   </div>
+
+                  {/* Vehicle GPS Coordinates Override */}
+                  <div className="space-y-3 pt-2 border-t border-border-default">
+                    <span className="text-small font-medium text-ink-800 block">
+                      {detectorContent.camera.gpsLabel}
+                    </span>
+                    <div className="grid grid-cols-2 gap-3">
+                      <Input
+                        label="Latitude"
+                        type="number"
+                        step="0.0001"
+                        value={coordinates.lat}
+                        onChange={(e) =>
+                          setCoordinates((prev) => ({
+                            ...prev,
+                            lat: parseFloat(e.target.value) || 0,
+                          }))
+                        }
+                      />
+                      <Input
+                        label="Longitude"
+                        type="number"
+                        step="0.0001"
+                        value={coordinates.lng}
+                        onChange={(e) =>
+                          setCoordinates((prev) => ({
+                            ...prev,
+                            lng: parseFloat(e.target.value) || 0,
+                          }))
+                        }
+                      />
+                    </div>
+                    <div className="text-caption text-text-muted flex items-center gap-1.5">
+                      <div
+                        className={`w-2 h-2 rounded-full ${
+                          gpsActive ? "bg-sev-low" : "bg-text-muted"
+                        }`}
+                      />
+                      <span>
+                        {gpsActive ? detectorContent.camera.gpsActive : detectorContent.camera.gpsSearching}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </Card>
+            </div>
+          </div>
+        )}
+
+        {/* Mode 2: ROAD MEDIA FILE UPLOAD INSPECTION */}
+        {activeTab === "upload" && (
+          <div className="space-y-8">
+            <Card title="Road media inspection" subtitle="Upload pavement photos or dashcam videos to run YOLO hazard detection">
+              <div className="space-y-6">
+                {/* Upload Dropzone using EmptyState component */}
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp,video/mp4,video/quicktime"
+                  className="hidden"
+                  onChange={(e) => {
+                    if (e.target.files && e.target.files[0]) {
+                      handleFileUpload(e.target.files[0]);
+                    }
+                  }}
+                />
+
+                <EmptyState
+                  title={detectorContent.upload.dropzoneTitle}
+                  description={detectorContent.upload.dropzoneDescription}
+                  icon={<UploadCloud className="w-6 h-6 text-primary-600" aria-hidden="true" />}
+                  onFileDrop={(file) => handleFileUpload(file)}
+                  action={
+                    <Button
+                      variant="primary"
+                      size="md"
+                      disabled={isAnalyzingFile}
+                      leftIcon={<UploadCloud className="w-4 h-4" />}
+                      onClick={() => fileInputRef.current?.click()}
+                    >
+                      {isAnalyzingFile
+                        ? detectorContent.upload.analyzingText
+                        : detectorContent.upload.uploadButtonText}
+                    </Button>
+                  }
+                />
+
+                {uploadError && (
+                  <Alert variant="error" title="Media analysis failed">
+                    {uploadError}
+                  </Alert>
                 )}
 
-                {/* Model Confidence Calibration Slider */}
-                <div className="space-y-2 pt-2 border-t border-border-default">
-                  <div className="flex items-center justify-between text-small">
-                    <span className="font-medium text-ink-800">
-                      {detectorContent.camera.confidenceLabel}
-                    </span>
-                    <span className="font-mono text-ink-900 font-semibold">
-                      {Math.round(confidenceThreshold * 100)}%
-                    </span>
-                  </div>
-                  <input
-                    type="range"
-                    min="0.10"
-                    max="0.90"
-                    step="0.05"
-                    value={confidenceThreshold}
-                    onChange={(e) => setConfidenceThreshold(parseFloat(e.target.value))}
-                    className="w-full accent-primary-600 h-2 bg-border-default rounded cursor-pointer"
-                  />
-                </div>
+                {/* Upload Inspection Results */}
+                {uploadResult && (
+                  <div className="mt-8 pt-6 border-t border-border-default space-y-6">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                      <div>
+                        <h3 className="text-h4 font-medium text-ink-900">
+                          {detectorContent.upload.resultsTitle}: {uploadResult.filename}
+                        </h3>
+                        <p className="text-small text-text-muted mt-0.5">
+                          Detected {uploadResult.total_detections} road hazard(s) in {uploadResult.inference_time_ms}ms
+                        </p>
+                      </div>
 
-                {/* Detection Scan Rate Frequency */}
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between text-small">
-                    <span className="font-medium text-ink-800">
-                      {detectorContent.camera.intervalLabel}
-                    </span>
-                    <span className="font-mono text-ink-900 font-semibold">
-                      {scanInterval}ms (~{(1000 / scanInterval).toFixed(1)} FPS)
-                    </span>
-                  </div>
-                  <div className="grid grid-cols-3 gap-2">
-                    {[250, 400, 800].map((ms) => (
-                      <button
-                        key={ms}
-                        type="button"
-                        onClick={() => setScanInterval(ms)}
-                        className={`min-h-[44px] rounded border text-small font-medium transition-colors ${
-                          scanInterval === ms
-                            ? "border-primary-600 bg-primary-50 text-primary-600 font-semibold"
-                            : "border-border-default bg-bg-surface text-text-body hover:bg-primary-50"
-                        }`}
-                      >
-                        {ms === 250 ? "Fast (250ms)" : ms === 400 ? "Balanced" : "Low CPU (800ms)"}
-                      </button>
-                    ))}
-                  </div>
-                </div>
+                      {uploadResult.total_detections > 0 && (
+                        <Button
+                          variant="primary"
+                          size="md"
+                          leftIcon={<Check className="w-4 h-4" />}
+                          onClick={logUploadToDatabase}
+                        >
+                          {detectorContent.upload.logPotholesButtonText}
+                        </Button>
+                      )}
+                    </div>
 
-                {/* Vehicle Coordinates Manual Override */}
-                <div className="space-y-3 pt-2 border-t border-border-default">
-                  <span className="text-small font-medium text-ink-800 block">
-                    Vehicle GPS coordinates
-                  </span>
-                  <div className="grid grid-cols-2 gap-3">
-                    <Input
-                      label="Latitude"
-                      type="number"
-                      step="0.0001"
-                      value={coordinates.lat}
-                      onChange={(e) =>
-                        setCoordinates((prev) => ({
-                          ...prev,
-                          lat: parseFloat(e.target.value) || 0,
-                        }))
-                      }
-                    />
-                    <Input
-                      label="Longitude"
-                      type="number"
-                      step="0.0001"
-                      value={coordinates.lng}
-                      onChange={(e) =>
-                        setCoordinates((prev) => ({
-                          ...prev,
-                          lng: parseFloat(e.target.value) || 0,
-                        }))
-                      }
-                    />
+                    {/* Annotated Image Preview */}
+                    {uploadResult.annotated_image_url && (
+                      <div className="rounded border border-border-default overflow-hidden bg-ink-900 max-w-2xl mx-auto shadow-card">
+                        <img
+                          src={uploadResult.annotated_image_url}
+                          alt="Annotated detection preview"
+                          className="w-full h-auto object-contain"
+                        />
+                      </div>
+                    )}
+
+                    {/* Detected Items Table */}
+                    {uploadResult.detections.length > 0 && (
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-left text-small">
+                          <thead>
+                            <tr className="border-b border-border-default text-text-muted">
+                              <th className="py-2.5 px-3 font-medium">Index</th>
+                              <th className="py-2.5 px-3 font-medium">Class</th>
+                              <th className="py-2.5 px-3 font-medium">Confidence</th>
+                              <th className="py-2.5 px-3 font-medium">Severity</th>
+                              <th className="py-2.5 px-3 font-medium">Bounding Box (X1, Y1, X2, Y2)</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-border-default">
+                            {uploadResult.detections.map((det, idx) => (
+                              <tr key={idx} className="hover:bg-primary-50 transition-colors">
+                                <td className="py-2.5 px-3 font-medium text-ink-900">#{idx + 1}</td>
+                                <td className="py-2.5 px-3 font-medium text-ink-900">{det.class_name}</td>
+                                <td className="py-2.5 px-3 font-mono">{Math.round(det.confidence * 100)}%</td>
+                                <td className="py-2.5 px-3">
+                                  <Badge
+                                    size="sm"
+                                    variant={
+                                      det.severity === "high"
+                                        ? "severity-high"
+                                        : det.severity === "medium"
+                                        ? "severity-medium"
+                                        : "severity-low"
+                                    }
+                                  >
+                                    {det.severity.toUpperCase()}
+                                  </Badge>
+                                </td>
+                                <td className="py-2.5 px-3 font-mono text-text-muted">
+                                  [{det.box.join(", ")}]
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
                   </div>
-                  <div className="text-caption text-text-muted flex items-center gap-1.5">
-                    <div
-                      className={`w-2 h-2 rounded-full ${
-                        gpsActive ? "bg-sev-low" : "bg-text-muted"
-                      }`}
-                    />
-                    <span>
-                      {gpsActive ? "Hardware GPS active" : detectorContent.camera.gpsSearching}
-                    </span>
-                  </div>
-                </div>
+                )}
               </div>
             </Card>
           </div>
-        </div>
+        )}
 
         {/* Real-time Detection Event Log Table */}
         <Card
           title={detectorContent.history.title}
-          subtitle="Recent road hazard detection events recorded from live camera stream"
+          subtitle={detectorContent.history.subtitle}
           headerAction={
             detectionLogs.length > 0 ? (
               <Button
@@ -969,11 +1265,11 @@ export const DetectorPage: React.FC = () => {
                 <thead>
                   <tr className="border-b border-border-default text-text-muted">
                     <th className="py-2.5 px-3 font-medium">{detectorContent.history.timeHeader}</th>
-                    <th className="py-2.5 px-3 font-medium">Potholes</th>
+                    <th className="py-2.5 px-3 font-medium">{detectorContent.history.potholesHeader}</th>
                     <th className="py-2.5 px-3 font-medium">{detectorContent.history.severityHeader}</th>
                     <th className="py-2.5 px-3 font-medium">{detectorContent.history.confidenceHeader}</th>
                     <th className="py-2.5 px-3 font-medium">{detectorContent.history.gpsHeader}</th>
-                    <th className="py-2.5 px-3 font-medium">Map status</th>
+                    <th className="py-2.5 px-3 font-medium">{detectorContent.history.statusHeader}</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border-default">
@@ -1004,10 +1300,12 @@ export const DetectorPage: React.FC = () => {
                       <td className="py-2.5 px-3">
                         {entry.savedToDb ? (
                           <span className="inline-flex items-center gap-1 text-sev-low font-medium">
-                            Logged to database
+                            {detectorContent.history.loggedBadge}
                           </span>
                         ) : (
-                          <span className="text-text-muted">Stream only</span>
+                          <span className="text-text-muted">
+                            {detectorContent.history.streamOnlyBadge}
+                          </span>
                         )}
                       </td>
                     </tr>
@@ -1023,6 +1321,111 @@ export const DetectorPage: React.FC = () => {
           <p>{detectorContent.results.disclaimer}</p>
         </footer>
       </div>
+
+      {/* Cloud API Configuration Modal */}
+      {isConfigOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-ink-900/60 backdrop-blur-sm"
+        >
+          <div className="bg-bg-surface rounded border border-border-default shadow-card max-w-lg w-full p-6 space-y-5 animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-center justify-between pb-3 border-b border-border-default">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded bg-primary-50 flex items-center justify-center text-primary-600">
+                  <Server className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-h4 font-medium text-ink-900">
+                    {detectorContent.cloudApi.modalTitle}
+                  </h3>
+                  <p className="text-caption text-text-muted">
+                    {detectorContent.cloudApi.modalSubtitle}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsConfigOpen(false)}
+                className="text-text-muted hover:text-ink-900 p-1"
+                aria-label="Close dialog"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="space-y-4">
+              <Input
+                label={detectorContent.cloudApi.urlLabel}
+                placeholder={detectorContent.cloudApi.urlPlaceholder}
+                value={inputApiUrl}
+                onChange={(e) => setInputApiUrl(e.target.value)}
+                helperText="Example: https://your-backend.onrender.com (leave blank for local dev)"
+              />
+
+              <div className="p-3 bg-primary-50 rounded border border-primary-100 text-small text-text-body space-y-2">
+                <span className="font-semibold text-primary-700 block">Cloud Hosting Note:</span>
+                <p className="text-caption leading-relaxed">
+                  {detectorContent.cloudApi.cloudHelpText}
+                </p>
+              </div>
+
+              {/* Real-time Health Status */}
+              <div className="flex items-center justify-between p-3 rounded bg-bg-page border border-border-default">
+                <div className="flex items-center gap-2">
+                  <span className="text-small font-medium text-ink-900">Service Status:</span>
+                  <Badge
+                    size="sm"
+                    variant={
+                      apiHealth.status === "online"
+                        ? "severity-low"
+                        : apiHealth.status === "checking"
+                        ? "severity-medium"
+                        : "severity-high"
+                    }
+                  >
+                    {apiHealth.status.toUpperCase()}
+                  </Badge>
+                </div>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => runHealthCheck(inputApiUrl)}
+                >
+                  {detectorContent.cloudApi.testConnectionText}
+                </Button>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between pt-4 border-t border-border-default">
+              <Button
+                variant="ghost"
+                size="md"
+                onClick={handleResetApiUrl}
+              >
+                {detectorContent.cloudApi.resetDefaultText}
+              </Button>
+
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="secondary"
+                  size="md"
+                  onClick={() => setIsConfigOpen(false)}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  variant="primary"
+                  size="md"
+                  onClick={handleSaveApiUrl}
+                >
+                  {detectorContent.cloudApi.saveUrlText}
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

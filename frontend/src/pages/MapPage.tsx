@@ -27,6 +27,7 @@ import {
 } from "../components";
 import { mapContent } from "../config/content/map";
 import { siteConfig } from "../config/site.config";
+import { getApiBaseUrl } from "../config/api";
 
 interface PotholeItem {
   id: number;
@@ -113,7 +114,7 @@ export const MapPage: React.FC = () => {
     setIsLoading(true);
     setErrorMessage(null);
     try {
-      const apiUrl = import.meta.env.VITE_API_URL || "http://localhost:8000";
+      const apiUrl = getApiBaseUrl();
       let url = `${apiUrl}/api/potholes?page=1&page_size=100`;
       if (selectedSeverity) {
         url += `&severity=${selectedSeverity}`;
@@ -145,7 +146,7 @@ export const MapPage: React.FC = () => {
       return;
     }
     try {
-      const apiUrl = import.meta.env.VITE_API_URL || "http://localhost:8000";
+      const apiUrl = getApiBaseUrl();
       const res = await fetch(`${apiUrl}/api/potholes/${id}`, {
         method: "DELETE",
       });

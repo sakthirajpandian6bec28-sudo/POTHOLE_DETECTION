@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     SEVERITY_LOW_MAX: float = 0.02
     SEVERITY_MEDIUM_MAX: float = 0.08
 
-    CORS_ORIGINS: str = "http://localhost:5173,http://127.0.0.1:5173"
+    CORS_ORIGINS: str = "*"
     DATABASE_URL: str = "sqlite:///./potholes.db"
 
     @property

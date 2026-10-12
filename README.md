@@ -133,6 +133,28 @@ Open `http://localhost:5173` in your browser.
 
 ---
 
+## Cloud Deployment (Live Camera & Mobile)
+
+To host the application on cloud platforms (e.g. Render, Railway, Vercel, Netlify):
+
+1. **Deploy Backend**:
+   - Set environment variable `CORS_ORIGINS=*` in your cloud provider dashboard.
+   - Start command: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
+   - Verify health: `GET https://your-backend.onrender.com/api/health`
+
+2. **Deploy Frontend**:
+   - Set environment variable `VITE_API_URL=https://your-backend.onrender.com` in your frontend build settings.
+   - Build command: `npm run build`
+   - Output directory: `dist`
+
+3. **Using on Mobile Devices**:
+   - Open your hosted HTTPS frontend link on your phone (e.g. `https://your-app.vercel.app`).
+   - Tap **Start camera feed** and grant camera and location permissions.
+   - Tap **Flip camera** to toggle between the rear road-facing camera and the front camera.
+   - If `VITE_API_URL` was not set during build, tap the **Cloud API** status pill in the top header and enter your backend URL.
+
+---
+
 ## Customization
 
 To modify product names, copy, colors, or model thresholds, refer to [`CUSTOMIZING.md`](./CUSTOMIZING.md) for the complete reference table.

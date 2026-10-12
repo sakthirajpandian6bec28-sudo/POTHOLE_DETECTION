@@ -73,15 +73,6 @@ class ModelManager:
             else:
                 self._class_names = {0: "pothole"}
 
-            # Warm up inference to initialize PyTorch graph and allocate buffers once at startup
-            try:
-                dummy = Image.new("RGB", (320, 320))
-                with torch.no_grad():
-                    self._model.predict(source=dummy, imgsz=320, verbose=False)
-                logger.info("YOLO model warmup complete.")
-            except Exception as w_err:
-                logger.warning(f"Model warmup notice: {w_err}")
-
             self._is_loaded = True
             self._error = None
             logger.info(f"Model loaded successfully. Class names: {self._class_names}")

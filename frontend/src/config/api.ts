@@ -59,7 +59,7 @@ export async function checkApiHealth(baseUrl?: string): Promise<{
   try {
     const endpoint = url ? `${url}/api/health` : "/api/health";
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 15000);
+    const timer = setTimeout(() => controller.abort(), 25000);
 
     const res = await fetch(endpoint, {
       method: "GET",

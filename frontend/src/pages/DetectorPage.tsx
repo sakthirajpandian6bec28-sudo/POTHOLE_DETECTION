@@ -453,7 +453,8 @@ export const DetectorPage: React.FC = () => {
       const apiUrl = getApiBaseUrl();
 
       const controller = new AbortController();
-      const fetchTimer = setTimeout(() => controller.abort(), 12000);
+      // Generous 30s timeout for cloud inference cold-start to prevent premature abort
+      const fetchTimer = setTimeout(() => controller.abort(), 30000);
 
       const response = await fetch(`${apiUrl}/api/detect/frame`, {
         method: "POST",
@@ -527,20 +528,30 @@ export const DetectorPage: React.FC = () => {
       }
     } catch (err: unknown) {
       consecutiveErrorsRef.current += 1;
-      const msg = err instanceof Error ? err.message : String(err);
+      const isAbort =
+        (err instanceof DOMException && err.name === "AbortError") ||
+        (err instanceof Error &&
+          (err.name === "AbortError" || err.message.toLowerCase().includes("aborted")));
 
-      if (consecutiveErrorsRef.current >= 3) {
-        const targetUrl = getApiBaseUrl();
-        setApiErrorMessage(
-          `Cloud detection service unreachable at '${targetUrl}': ${msg}. The backend service may be starting up.`
-        );
+      let friendlyMsg = err instanceof Error ? err.message : String(err);
+      if (isAbort) {
+        friendlyMsg =
+          "Cloud detection service is waking up (Render free tier spin-up). Connecting automatically...";
+      }
+
+      if (consecutiveErrorsRef.current >= 4) {
+        setApiErrorMessage(friendlyMsg);
       }
     } finally {
       isProcessingRef.current = false;
       setIsProcessingFrame(false);
 
       if (isStreamingRef.current) {
-        loopTimeoutRef.current = window.setTimeout(processLiveFrame, scanInterval);
+        const delay =
+          consecutiveErrorsRef.current > 0
+            ? Math.min(3000, scanInterval * (consecutiveErrorsRef.current + 1))
+            : scanInterval;
+        loopTimeoutRef.current = window.setTimeout(processLiveFrame, delay);
       }
     }
   }, [
@@ -940,25 +951,27 @@ export const DetectorPage: React.FC = () => {
                 {/* Bottom Viewport Control Toolbar */}
                 <div className="p-4 bg-bg-surface border-t border-border-default flex flex-wrap items-center justify-between gap-4">
                   <div className="flex flex-wrap items-center gap-3">
-                    {isStreaming ? (
-                      <Button
-                        variant="danger"
-                        size="md"
-                        leftIcon={<Square className="w-4 h-4" />}
-                        onClick={stopCamera}
-                      >
-                        {detectorContent.camera.stopCameraText}
-                      </Button>
-                    ) : (
-                      <Button
-                        variant="primary"
-                        size="md"
-                        leftIcon={<Play className="w-4 h-4" />}
-                        onClick={() => startCamera()}
-                      >
-                        {detectorContent.camera.startCameraText}
-                      </Button>
-                    )}
+                    {/* Start Camera Feed Button */}
+                    <Button
+                      variant="primary"
+                      size="md"
+                      disabled={isStreaming}
+                      leftIcon={<Play className="w-4 h-4" />}
+                      onClick={() => startCamera()}
+                    >
+                      {detectorContent.camera.startCameraText}
+                    </Button>
+
+                    {/* Stop Camera Feed Button */}
+                    <Button
+                      variant="danger"
+                      size="md"
+                      disabled={!isStreaming}
+                      leftIcon={<Square className="w-4 h-4" />}
+                      onClick={stopCamera}
+                    >
+                      {detectorContent.camera.stopCameraText}
+                    </Button>
 
                     {/* Camera Flip / Switch Button */}
                     <Button

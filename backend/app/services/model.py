@@ -54,6 +54,12 @@ class ModelManager:
             return False
 
         try:
+            import torch
+            try:
+                torch.set_num_threads(2)
+            except Exception:
+                pass
+
             from ultralytics import YOLO
 
             logger.info(f"Loading YOLO model from {self._model_path}...")
@@ -66,6 +72,15 @@ class ModelManager:
                 self._class_names = {idx: str(name) for idx, name in enumerate(self._model.names)}
             else:
                 self._class_names = {0: "pothole"}
+
+            # Warm up inference to initialize PyTorch graph and allocate buffers once at startup
+            try:
+                dummy = Image.new("RGB", (320, 320))
+                with torch.no_grad():
+                    self._model.predict(source=dummy, imgsz=320, verbose=False)
+                logger.info("YOLO model warmup complete.")
+            except Exception as w_err:
+                logger.warning(f"Model warmup notice: {w_err}")
 
             self._is_loaded = True
             self._error = None
@@ -102,12 +117,15 @@ class ModelManager:
         img_width, img_height = image.size
 
         # Run inference
-        results = self._model.predict(
-            source=image,
-            conf=conf,
-            iou=settings.IOU_THRESHOLD,
-            verbose=False,
-        )
+        import torch
+        with torch.no_grad():
+            results = self._model.predict(
+                source=image,
+                conf=conf,
+                iou=settings.IOU_THRESHOLD,
+                imgsz=640,
+                verbose=False,
+            )
 
         inference_time_ms = round((time.perf_counter() - start_time) * 1000, 2)
 
@@ -187,13 +205,15 @@ class ModelManager:
 
         img_width, img_height = image.size
 
-        results = self._model.predict(
-            source=image,
-            conf=conf,
-            iou=settings.IOU_THRESHOLD,
-            imgsz=640,
-            verbose=False,
-        )
+        import torch
+        with torch.no_grad():
+            results = self._model.predict(
+                source=image,
+                conf=conf,
+                iou=settings.IOU_THRESHOLD,
+                imgsz=640,
+                verbose=False,
+            )
 
         inference_time_ms = round((time.perf_counter() - start_time) * 1000, 2)
         detections: List[DetectionItem] = []

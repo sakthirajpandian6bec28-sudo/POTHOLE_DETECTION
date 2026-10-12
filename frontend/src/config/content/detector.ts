@@ -32,6 +32,8 @@ export interface DetectorContent {
     noCameraDetected: string;
     permissionError: string;
     httpsNotice: string;
+    landscapeModeText: string;
+    portraitModeText: string;
   };
   upload: {
     tabTitle: string;
@@ -122,6 +124,8 @@ export const detectorContent: DetectorContent = {
     noCameraDetected: "No video input devices found on this system.",
     permissionError: "Camera permission denied. Please allow camera access in browser site settings.",
     httpsNotice: "Mobile cameras require a secure HTTPS connection. Please ensure this site is served over HTTPS.",
+    landscapeModeText: "Landscape cockpit",
+    portraitModeText: "Standard view",
   },
   upload: {
     tabTitle: "Inspect road photo / video",

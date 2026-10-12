@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 from fastapi import APIRouter, UploadFile, File, Form, Depends, Request
+from starlette.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 
 import urllib.request
@@ -119,9 +120,14 @@ async def detect_media(
     data = await read_and_validate_size(file)
 
     if media_category == "image":
-        response = model_manager.predict_image(data, confidence_threshold=confidence)
+        response = await run_in_threadpool(
+            model_manager.predict_image,
+            data,
+            confidence_threshold=confidence,
+        )
     else:
-        response = model_manager.predict_video(
+        response = await run_in_threadpool(
+            model_manager.predict_video,
             video_bytes=data,
             filename=file.filename or "video.mp4",
             confidence_threshold=confidence,
@@ -154,7 +160,8 @@ async def detect_live_frame(
             action="Ensure the video frame is formatted as a valid base64 encoded JPEG or PNG image.",
         )
 
-    detections, severity_counts, highest_severity, inference_time_ms = model_manager.predict_frame(
+    detections, severity_counts, highest_severity, inference_time_ms = await run_in_threadpool(
+        model_manager.predict_frame,
         image_bytes=frame_bytes,
         confidence_threshold=payload.confidence_threshold,
     )

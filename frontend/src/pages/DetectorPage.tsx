@@ -9,10 +9,10 @@ import {
   ExternalLink,
   Trash2,
   UploadCloud,
-  Server,
   Activity,
-  Sliders,
   Check,
+  Maximize2,
+  Minimize2,
 } from "lucide-react";
 
 import {
@@ -28,8 +28,6 @@ import { detectorContent } from "../config/content/detector";
 import { siteConfig } from "../config/site.config";
 import {
   getApiBaseUrl,
-  setApiBaseUrl,
-  resetApiBaseUrl,
   checkApiHealth,
 } from "../config/api";
 
@@ -71,6 +69,15 @@ export const DetectorPage: React.FC = () => {
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>("");
   const [facingMode, setFacingMode] = useState<"environment" | "user">("environment");
 
+  // Phone Orientation & Cockpit Landscape Mode
+  const [isLandscape, setIsLandscape] = useState<boolean>(() => {
+    if (typeof window !== "undefined") {
+      return window.innerWidth > window.innerHeight;
+    }
+    return false;
+  });
+  const [isCockpitMode, setIsCockpitMode] = useState<boolean>(false);
+
   // Detection parameters
   const [confidenceThreshold, setConfidenceThreshold] = useState<number>(0.25);
   const [scanInterval, setScanInterval] = useState<number>(400); // ms
@@ -89,17 +96,7 @@ export const DetectorPage: React.FC = () => {
   const [maxSeverity, setMaxSeverity] = useState<string | null>(null);
   const [isProcessingFrame, setIsProcessingFrame] = useState<boolean>(false);
 
-  // Cloud API Configuration & Health
-  const [currentApiUrl, setCurrentApiUrl] = useState<string>(getApiBaseUrl());
-  const [inputApiUrl, setInputApiUrl] = useState<string>(getApiBaseUrl());
-  const [apiHealth, setApiHealth] = useState<{
-    status: "online" | "offline" | "checking" | "unknown";
-    latency: number;
-    message?: string;
-  }>({ status: "unknown", latency: 0 });
-  const [isConfigOpen, setIsConfigOpen] = useState<boolean>(false);
-
-  // Errors and notification
+  // Errors and notifications
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [apiErrorMessage, setApiErrorMessage] = useState<string | null>(null);
   const consecutiveErrorsRef = useRef<number>(0);
@@ -123,32 +120,47 @@ export const DetectorPage: React.FC = () => {
   const isProcessingRef = useRef<boolean>(false);
   const lastLogTimeRef = useRef<number>(0);
 
-  // 1. Initial Health Check on API
-  const runHealthCheck = useCallback(async (targetUrl?: string) => {
-    setApiHealth({ status: "checking", latency: 0 });
-    const res = await checkApiHealth(targetUrl);
-    if (res.ok) {
-      setApiHealth({
-        status: "online",
-        latency: res.latencyMs,
-        message: res.message,
-      });
-      setApiErrorMessage(null);
-      consecutiveErrorsRef.current = 0;
-    } else {
-      setApiHealth({
-        status: "offline",
-        latency: res.latencyMs,
-        message: res.message,
-      });
+  // 1. Phone Orientation Listener (Auto-landscape on phone rotation)
+  useEffect(() => {
+    const handleOrientation = () => {
+      const landscape =
+        window.innerWidth > window.innerHeight ||
+        (window.screen?.orientation
+          ? window.screen.orientation.type.includes("landscape")
+          : false);
+      setIsLandscape(landscape);
+    };
+
+    window.addEventListener("resize", handleOrientation);
+    window.addEventListener("orientationchange", handleOrientation);
+
+    if (window.screen?.orientation) {
+      window.screen.orientation.addEventListener("change", handleOrientation);
     }
+
+    handleOrientation();
+
+    return () => {
+      window.removeEventListener("resize", handleOrientation);
+      window.removeEventListener("orientationchange", handleOrientation);
+      if (window.screen?.orientation) {
+        window.screen.orientation.removeEventListener("change", handleOrientation);
+      }
+    };
   }, []);
 
+  // 2. Initial silent health check on backend
   useEffect(() => {
-    runHealthCheck(currentApiUrl);
-  }, [currentApiUrl, runHealthCheck]);
+    const runCheck = async () => {
+      const res = await checkApiHealth();
+      if (!res.ok) {
+        console.warn("Backend health check:", res.message);
+      }
+    };
+    runCheck();
+  }, []);
 
-  // 2. Enumerate video input devices
+  // 3. Enumerate video input devices
   const enumerateCameras = useCallback(async () => {
     try {
       if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
@@ -169,7 +181,7 @@ export const DetectorPage: React.FC = () => {
     enumerateCameras();
   }, [enumerateCameras]);
 
-  // 3. Track GPS coordinates using Geolocation API
+  // 4. Track GPS coordinates using Geolocation API
   useEffect(() => {
     if ("geolocation" in navigator) {
       const watchId = navigator.geolocation.watchPosition(
@@ -189,7 +201,7 @@ export const DetectorPage: React.FC = () => {
     }
   }, []);
 
-  // 4. Clear canvas overlays
+  // 5. Clear canvas overlays
   const clearOverlay = useCallback(() => {
     const canvas = canvasRef.current;
     if (canvas) {
@@ -200,7 +212,7 @@ export const DetectorPage: React.FC = () => {
     }
   }, []);
 
-  // 5. Start camera stream
+  // 6. Start camera stream with orientation optimization
   const startCamera = async (overrideFacingMode?: "environment" | "user") => {
     setErrorMessage(null);
     setApiErrorMessage(null);
@@ -213,17 +225,26 @@ export const DetectorPage: React.FC = () => {
       return;
     }
 
-    // Stop existing stream if switching
+    // Stop existing stream if running
     if (mediaStreamRef.current) {
       mediaStreamRef.current.getTracks().forEach((track) => track.stop());
       mediaStreamRef.current = null;
     }
 
     try {
+      const useWide = isLandscape || isCockpitMode;
       const constraints: MediaStreamConstraints = {
         video: selectedDeviceId && !overrideFacingMode
-          ? { deviceId: { exact: selectedDeviceId }, width: { ideal: 1280 }, height: { ideal: 720 } }
-          : { facingMode: { ideal: targetFacing }, width: { ideal: 1280 }, height: { ideal: 720 } },
+          ? {
+              deviceId: { exact: selectedDeviceId },
+              width: { ideal: useWide ? 1920 : 1280 },
+              height: { ideal: useWide ? 1080 : 720 },
+            }
+          : {
+              facingMode: { ideal: targetFacing },
+              width: { ideal: useWide ? 1920 : 1280 },
+              height: { ideal: useWide ? 1080 : 720 },
+            },
         audio: false,
       };
 
@@ -252,7 +273,7 @@ export const DetectorPage: React.FC = () => {
     }
   };
 
-  // 6. Stop camera stream
+  // 7. Stop camera stream
   const stopCamera = useCallback(() => {
     if (loopTimeoutRef.current) {
       window.clearTimeout(loopTimeoutRef.current);
@@ -281,7 +302,7 @@ export const DetectorPage: React.FC = () => {
     };
   }, [stopCamera]);
 
-  // 7. Toggle between rear environment camera and front selfie camera
+  // 8. Toggle between rear environment camera and front selfie camera
   const toggleFacingMode = () => {
     const nextMode = facingMode === "environment" ? "user" : "environment";
     setFacingMode(nextMode);
@@ -290,7 +311,38 @@ export const DetectorPage: React.FC = () => {
     }
   };
 
-  // 8. Draw bounding boxes on canvas overlay
+  // 9. Toggle Cockpit Landscape mode manually
+  const toggleCockpitLandscape = async () => {
+    const nextCockpit = !isCockpitMode;
+    setIsCockpitMode(nextCockpit);
+
+    if (nextCockpit) {
+      try {
+        if (document.documentElement.requestFullscreen) {
+          await document.documentElement.requestFullscreen().catch(() => {});
+        }
+        if (window.screen?.orientation && "lock" in window.screen.orientation) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          await (window.screen.orientation as any).lock("landscape").catch(() => {});
+        }
+      } catch {
+        // Fallback gracefully if fullscreen/lock is restricted
+      }
+    } else {
+      try {
+        if (document.fullscreenElement && document.exitFullscreen) {
+          await document.exitFullscreen().catch(() => {});
+        }
+        if (window.screen?.orientation && "unlock" in window.screen.orientation) {
+          window.screen.orientation.unlock();
+        }
+      } catch {
+        // Fallback gracefully
+      }
+    }
+  };
+
+  // 10. Draw bounding boxes on canvas overlay
   const renderDetections = useCallback(
     (
       detections: Array<{
@@ -360,7 +412,7 @@ export const DetectorPage: React.FC = () => {
     []
   );
 
-  // 9. Process single live video frame (Adaptive Loop - No Swallowed Errors)
+  // 11. Process single live video frame (Adaptive Loop - No Swallowed Errors)
   const processLiveFrame = useCallback(async () => {
     if (!isStreamingRef.current || isProcessingRef.current) {
       return;
@@ -368,7 +420,6 @@ export const DetectorPage: React.FC = () => {
 
     const video = videoRef.current;
     if (!video || video.readyState < 2 || video.videoWidth === 0 || video.videoHeight === 0) {
-      // Schedule next check if video is not ready yet
       if (isStreamingRef.current) {
         loopTimeoutRef.current = window.setTimeout(processLiveFrame, scanInterval);
       }
@@ -401,14 +452,8 @@ export const DetectorPage: React.FC = () => {
       const shouldLogToDb = autoLog && nowMs - lastLogTimeRef.current > 3000;
       const apiUrl = getApiBaseUrl();
 
-      // Check mixed content before network attempt
-      if (window.location.protocol === "https:" && apiUrl.startsWith("http://")) {
-        setApiErrorMessage(detectorContent.cloudApi.mixedContentWarning);
-        return;
-      }
-
       const controller = new AbortController();
-      const fetchTimer = setTimeout(() => controller.abort(), 6000);
+      const fetchTimer = setTimeout(() => controller.abort(), 12000);
 
       const response = await fetch(`${apiUrl}/api/detect/frame`, {
         method: "POST",
@@ -431,12 +476,8 @@ export const DetectorPage: React.FC = () => {
 
       const result = await response.json();
 
-      // Clear consecutive error count on successful inference
       consecutiveErrorsRef.current = 0;
       if (apiErrorMessage) setApiErrorMessage(null);
-      if (apiHealth.status !== "online") {
-        setApiHealth({ status: "online", latency: result.inference_time_ms });
-      }
 
       setLatencyMs(result.inference_time_ms);
       setActivePotholesCount(result.total_detections);
@@ -488,19 +529,16 @@ export const DetectorPage: React.FC = () => {
       consecutiveErrorsRef.current += 1;
       const msg = err instanceof Error ? err.message : String(err);
 
-      // Rule 4: Visible error banner if consecutive requests fail
       if (consecutiveErrorsRef.current >= 3) {
-        const targetUrl = getApiBaseUrl() || window.location.origin;
+        const targetUrl = getApiBaseUrl();
         setApiErrorMessage(
-          `Cloud detection API unreachable at '${targetUrl}': ${msg}. Verify your hosted backend service is running, VITE_API_URL is configured, and CORS is enabled.`
+          `Cloud detection service unreachable at '${targetUrl}': ${msg}. The backend service may be starting up.`
         );
-        setApiHealth({ status: "offline", latency: 0, message: msg });
       }
     } finally {
       isProcessingRef.current = false;
       setIsProcessingFrame(false);
 
-      // Adaptive loop: schedule next frame only after previous one finishes
       if (isStreamingRef.current) {
         loopTimeoutRef.current = window.setTimeout(processLiveFrame, scanInterval);
       }
@@ -513,7 +551,6 @@ export const DetectorPage: React.FC = () => {
     scanInterval,
     renderDetections,
     apiErrorMessage,
-    apiHealth.status,
   ]);
 
   // Trigger loop on isStreaming change
@@ -534,7 +571,7 @@ export const DetectorPage: React.FC = () => {
     };
   }, [isStreaming, processLiveFrame]);
 
-  // 10. Handle Road Media File Upload Inspection
+  // 12. Handle Road Media File Upload Inspection
   const handleFileUpload = async (file: File) => {
     setUploadError(null);
     setUploadResult(null);
@@ -594,7 +631,7 @@ export const DetectorPage: React.FC = () => {
     }
   };
 
-  // 11. Save uploaded detections to GIS Database
+  // 13. Save uploaded detections to GIS Database
   const logUploadToDatabase = async () => {
     if (!uploadResult || uploadResult.detections.length === 0) return;
 
@@ -625,27 +662,11 @@ export const DetectorPage: React.FC = () => {
     }
   };
 
-  // 12. Save custom API Endpoint URL
-  const handleSaveApiUrl = () => {
-    const clean = inputApiUrl.trim();
-    setApiBaseUrl(clean);
-    setCurrentApiUrl(clean);
-    setIsConfigOpen(false);
-    runHealthCheck(clean);
-  };
-
-  const handleResetApiUrl = () => {
-    resetApiBaseUrl();
-    const defaultUrl = getApiBaseUrl();
-    setInputApiUrl(defaultUrl);
-    setCurrentApiUrl(defaultUrl);
-    setIsConfigOpen(false);
-    runHealthCheck(defaultUrl);
-  };
+  const isWideFormat = isLandscape || isCockpitMode;
 
   return (
     <div className="w-full flex flex-col">
-      {/* Full-width Hero Gradient Header Band per design theme */}
+      {/* Full-width Hero Gradient Header Band */}
       <section className="w-full bg-hero-gradient text-white py-10 md:py-14 border-b border-ink-800">
         <div className="max-w-content mx-auto px-4 md:px-6">
           <div className="flex flex-col md:flex-row md:items-end justify-between gap-6">
@@ -661,34 +682,8 @@ export const DetectorPage: React.FC = () => {
               </p>
             </div>
 
-            {/* Quick Actions & Cloud API Pill */}
-            <div className="flex flex-wrap items-center gap-3 shrink-0">
-              {/* Cloud API Connection Indicator Pill */}
-              <button
-                type="button"
-                onClick={() => setIsConfigOpen(true)}
-                className="flex items-center gap-2 px-3 py-1.5 rounded bg-ink-900/80 border border-ink-800 text-caption font-medium hover:border-accent-400 transition-colors"
-                title="Click to view or edit backend cloud API URL"
-              >
-                <div
-                  className={`w-2 h-2 rounded-full ${
-                    apiHealth.status === "online"
-                      ? "bg-sev-low animate-pulse"
-                      : apiHealth.status === "checking"
-                      ? "bg-sev-medium"
-                      : "bg-danger"
-                  }`}
-                />
-                <span className="font-mono text-slate-200">
-                  {apiHealth.status === "online"
-                    ? `${detectorContent.cloudApi.statusOnline} (${apiHealth.latency}ms)`
-                    : apiHealth.status === "checking"
-                    ? detectorContent.cloudApi.statusChecking
-                    : detectorContent.cloudApi.statusOffline}
-                </span>
-                <Sliders className="w-3.5 h-3.5 text-accent-400 ml-1" />
-              </button>
-
+            {/* GIS Map Navigation */}
+            <div className="flex items-center gap-3 shrink-0">
               <Link to="/map">
                 <Button variant="secondary" size="sm" rightIcon={<ExternalLink className="w-4 h-4" />}>
                   View GIS map
@@ -714,13 +709,13 @@ export const DetectorPage: React.FC = () => {
           </Alert>
         )}
 
-        {/* Visible Alert Banner if Cloud API is Unreachable */}
+        {/* Visible Alert Banner if Cloud API encounters connection issues */}
         {apiErrorMessage && (
           <Alert
-            variant="error"
-            title="Cloud detection service unreachable"
-            actionText="Configure API server"
-            onAction={() => setIsConfigOpen(true)}
+            variant="warning"
+            title="Cloud detection service connection"
+            actionText="Dismiss"
+            onAction={() => setApiErrorMessage(null)}
             onClose={() => setApiErrorMessage(null)}
           >
             {apiErrorMessage}
@@ -861,10 +856,14 @@ export const DetectorPage: React.FC = () => {
         {/* Mode 1: LIVE VEHICLE CAMERA STUDIO */}
         {activeTab === "camera" && (
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-            {/* Left 2 Cols: Live Video HUD Viewport */}
-            <div className="lg:col-span-2 space-y-4">
-              <div className="rounded border border-border-default shadow-card overflow-hidden bg-ink-900 relative">
-                <div className="relative aspect-video w-full flex items-center justify-center bg-ink-900 overflow-hidden">
+            {/* Left 2 Cols: Live Video HUD Viewport (Expands in Landscape Cockpit Mode) */}
+            <div className={`space-y-4 ${isWideFormat ? "lg:col-span-3" : "lg:col-span-2"}`}>
+              <div
+                className={`rounded border border-border-default shadow-card overflow-hidden bg-ink-900 relative transition-all duration-300 ${
+                  isWideFormat ? "w-full max-h-[85vh] aspect-video" : "w-full aspect-video"
+                }`}
+              >
+                <div className="relative w-full h-full flex items-center justify-center bg-ink-900 overflow-hidden">
                   {/* Camera Video Stream */}
                   <video
                     ref={videoRef}
@@ -925,6 +924,11 @@ export const DetectorPage: React.FC = () => {
                       </div>
 
                       <div className="flex items-center gap-2">
+                        {isWideFormat && (
+                          <span className="hidden sm:inline-block bg-ink-900/90 text-accent-400 px-2.5 py-1 rounded text-caption border border-ink-800 font-semibold tracking-wider uppercase">
+                            COCKPIT HUD
+                          </span>
+                        )}
                         <div className="bg-ink-900/90 text-white px-2.5 py-1 rounded text-caption border border-ink-800 font-mono">
                           {coordinates.lat.toFixed(4)}, {coordinates.lng.toFixed(4)}
                         </div>
@@ -935,7 +939,7 @@ export const DetectorPage: React.FC = () => {
 
                 {/* Bottom Viewport Control Toolbar */}
                 <div className="p-4 bg-bg-surface border-t border-border-default flex flex-wrap items-center justify-between gap-4">
-                  <div className="flex items-center gap-3">
+                  <div className="flex flex-wrap items-center gap-3">
                     {isStreaming ? (
                       <Button
                         variant="danger"
@@ -967,6 +971,17 @@ export const DetectorPage: React.FC = () => {
                       {detectorContent.camera.switchCameraText} (
                       {facingMode === "environment" ? "Rear" : "Front"})
                     </Button>
+
+                    {/* Landscape Cockpit Toggle Button */}
+                    <Button
+                      variant="secondary"
+                      size="md"
+                      leftIcon={isCockpitMode ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
+                      onClick={toggleCockpitLandscape}
+                      title="Toggle wide vehicular landscape cockpit layout"
+                    >
+                      {isCockpitMode ? detectorContent.camera.portraitModeText : detectorContent.camera.landscapeModeText}
+                    </Button>
                   </div>
 
                   <div className="flex items-center gap-3">
@@ -984,8 +999,8 @@ export const DetectorPage: React.FC = () => {
               </div>
             </div>
 
-            {/* Right Column: Camera & Sensor Parameters */}
-            <div className="space-y-6">
+            {/* Right Column: Camera & Sensor Parameters (Only in non-wide format or below viewport) */}
+            <div className={`space-y-6 ${isWideFormat ? "lg:col-span-3" : ""}`}>
               <Card title="Sensor & vehicle calibration" subtitle="Live stream parameters and GPS positioning">
                 <div className="space-y-5">
                   {/* Video Input Device Picker */}
@@ -1321,111 +1336,6 @@ export const DetectorPage: React.FC = () => {
           <p>{detectorContent.results.disclaimer}</p>
         </footer>
       </div>
-
-      {/* Cloud API Configuration Modal */}
-      {isConfigOpen && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-ink-900/60 backdrop-blur-sm"
-        >
-          <div className="bg-bg-surface rounded border border-border-default shadow-card max-w-lg w-full p-6 space-y-5 animate-in fade-in zoom-in-95 duration-150">
-            <div className="flex items-center justify-between pb-3 border-b border-border-default">
-              <div className="flex items-center gap-2.5">
-                <div className="w-8 h-8 rounded bg-primary-50 flex items-center justify-center text-primary-600">
-                  <Server className="w-4 h-4" />
-                </div>
-                <div>
-                  <h3 className="text-h4 font-medium text-ink-900">
-                    {detectorContent.cloudApi.modalTitle}
-                  </h3>
-                  <p className="text-caption text-text-muted">
-                    {detectorContent.cloudApi.modalSubtitle}
-                  </p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setIsConfigOpen(false)}
-                className="text-text-muted hover:text-ink-900 p-1"
-                aria-label="Close dialog"
-              >
-                ✕
-              </button>
-            </div>
-
-            <div className="space-y-4">
-              <Input
-                label={detectorContent.cloudApi.urlLabel}
-                placeholder={detectorContent.cloudApi.urlPlaceholder}
-                value={inputApiUrl}
-                onChange={(e) => setInputApiUrl(e.target.value)}
-                helperText="Example: https://your-backend.onrender.com (leave blank for local dev)"
-              />
-
-              <div className="p-3 bg-primary-50 rounded border border-primary-100 text-small text-text-body space-y-2">
-                <span className="font-semibold text-primary-700 block">Cloud Hosting Note:</span>
-                <p className="text-caption leading-relaxed">
-                  {detectorContent.cloudApi.cloudHelpText}
-                </p>
-              </div>
-
-              {/* Real-time Health Status */}
-              <div className="flex items-center justify-between p-3 rounded bg-bg-page border border-border-default">
-                <div className="flex items-center gap-2">
-                  <span className="text-small font-medium text-ink-900">Service Status:</span>
-                  <Badge
-                    size="sm"
-                    variant={
-                      apiHealth.status === "online"
-                        ? "severity-low"
-                        : apiHealth.status === "checking"
-                        ? "severity-medium"
-                        : "severity-high"
-                    }
-                  >
-                    {apiHealth.status.toUpperCase()}
-                  </Badge>
-                </div>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => runHealthCheck(inputApiUrl)}
-                >
-                  {detectorContent.cloudApi.testConnectionText}
-                </Button>
-              </div>
-            </div>
-
-            <div className="flex items-center justify-between pt-4 border-t border-border-default">
-              <Button
-                variant="ghost"
-                size="md"
-                onClick={handleResetApiUrl}
-              >
-                {detectorContent.cloudApi.resetDefaultText}
-              </Button>
-
-              <div className="flex items-center gap-2">
-                <Button
-                  variant="secondary"
-                  size="md"
-                  onClick={() => setIsConfigOpen(false)}
-                >
-                  Cancel
-                </Button>
-                <Button
-                  variant="primary"
-                  size="md"
-                  onClick={handleSaveApiUrl}
-                >
-                  {detectorContent.cloudApi.saveUrlText}
-                </Button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 };

@@ -1,8 +1,10 @@
 /**
  * Centralized API endpoint resolver and connection utilities.
- * Handles environment variables, custom cloud URLs in localStorage,
- * and automatic localhost fallback.
+ * Defaults to the production Render cloud backend:
+ * https://pothole-detection-1-43ol.onrender.com
  */
+
+export const DEFAULT_PRODUCTION_API_URL = "https://pothole-detection-1-43ol.onrender.com";
 
 export function getApiBaseUrl(): string {
   if (typeof window !== "undefined") {
@@ -24,7 +26,7 @@ export function getApiBaseUrl(): string {
     }
   }
 
-  return "";
+  return DEFAULT_PRODUCTION_API_URL;
 }
 
 export function setApiBaseUrl(url: string): void {
@@ -57,7 +59,7 @@ export async function checkApiHealth(baseUrl?: string): Promise<{
   try {
     const endpoint = url ? `${url}/api/health` : "/api/health";
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 6000);
+    const timer = setTimeout(() => controller.abort(), 15000);
 
     const res = await fetch(endpoint, {
       method: "GET",
@@ -82,9 +84,9 @@ export async function checkApiHealth(baseUrl?: string): Promise<{
     return {
       ok: true,
       status: data.status || "healthy",
-      modelReady: Boolean(data.model?.loaded),
+      modelReady: Boolean(data.model_loaded || data.model?.loaded),
       latencyMs: elapsed,
-      message: data.model?.loaded ? "Model ready" : data.model?.error || "Model initializing",
+      message: data.model_loaded ? "Model ready" : data.model_error || "Model initializing",
     };
   } catch (err: unknown) {
     const elapsed = Math.round(performance.now() - start);

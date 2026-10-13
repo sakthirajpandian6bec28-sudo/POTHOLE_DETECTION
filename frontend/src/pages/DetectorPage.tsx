@@ -433,8 +433,8 @@ export const DetectorPage: React.FC = () => {
     const sourceH = video.videoHeight;
 
     try {
-      // Downscale to max 640px for low-latency network transfer over cloud
-      const maxDim = 640;
+      // Downscale to max 480px for low-latency transfer and lightweight cloud inference
+      const maxDim = 480;
       const scale = Math.min(1, maxDim / Math.max(sourceW, sourceH));
       const targetW = Math.round(sourceW * scale);
       const targetH = Math.round(sourceH * scale);
@@ -446,7 +446,7 @@ export const DetectorPage: React.FC = () => {
       if (!ctx) return;
 
       ctx.drawImage(video, 0, 0, targetW, targetH);
-      const frameBase64 = offscreen.toDataURL("image/jpeg", 0.65);
+      const frameBase64 = offscreen.toDataURL("image/jpeg", 0.55);
 
       const nowMs = Date.now();
       const shouldLogToDb = autoLog && nowMs - lastLogTimeRef.current > 3000;
@@ -528,15 +528,20 @@ export const DetectorPage: React.FC = () => {
       }
     } catch (err: unknown) {
       consecutiveErrorsRef.current += 1;
+      const errMsg = err instanceof Error ? err.message : String(err);
       const isAbort =
         (err instanceof DOMException && err.name === "AbortError") ||
         (err instanceof Error &&
           (err.name === "AbortError" || err.message.toLowerCase().includes("aborted")));
 
-      let friendlyMsg = err instanceof Error ? err.message : String(err);
-      if (isAbort) {
+      let friendlyMsg = errMsg;
+      if (
+        isAbort ||
+        errMsg.toLowerCase().includes("failed to fetch") ||
+        errMsg.toLowerCase().includes("networkerror")
+      ) {
         friendlyMsg =
-          "Cloud detection service is waking up (Render free tier spin-up). Connecting automatically...";
+          "Connecting to cloud AI detection service (waking up free-tier server). Auto-reconnecting...";
       }
 
       if (consecutiveErrorsRef.current >= 4) {

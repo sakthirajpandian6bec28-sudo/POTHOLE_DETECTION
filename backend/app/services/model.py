@@ -1,3 +1,13 @@
+import os
+
+# Enforce single-thread execution for OpenMP, MKL, OpenBLAS, and PyTorch
+# Crucial for cloud containers (Render free tier) to eliminate thread contention and OOM
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+
 import io
 import time
 import base64
@@ -5,6 +15,13 @@ import logging
 import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
+
+import torch
+torch.set_num_threads(1)
+try:
+    torch.set_num_interop_threads(1)
+except Exception:
+    pass
 
 from PIL import Image
 import numpy as np
@@ -54,12 +71,6 @@ class ModelManager:
             return False
 
         try:
-            import torch
-            try:
-                torch.set_num_threads(2)
-            except Exception:
-                pass
-
             from ultralytics import YOLO
 
             logger.info(f"Loading YOLO model from {self._model_path}...")
@@ -73,9 +84,24 @@ class ModelManager:
             else:
                 self._class_names = {0: "pothole"}
 
+            # Warm up JIT execution graph once at boot with a tiny 160x160 dummy frame
+            # Prevents first user request from suffering 30+ second kernel compile delay
+            try:
+                dummy = np.zeros((160, 160, 3), dtype=np.uint8)
+                with torch.inference_mode():
+                    self._model.predict(
+                        source=dummy,
+                        imgsz=160,
+                        verbose=False,
+                        device="cpu",
+                        half=False,
+                    )
+            except Exception as warmup_err:
+                logger.warning(f"Startup warmup notice: {warmup_err}")
+
             self._is_loaded = True
             self._error = None
-            logger.info(f"Model loaded successfully. Class names: {self._class_names}")
+            logger.info(f"Model loaded successfully and warmed up. Class names: {self._class_names}")
             return True
         except Exception as e:
             self._is_loaded = False
@@ -107,15 +133,24 @@ class ModelManager:
 
         img_width, img_height = image.size
 
-        # Run inference
-        import torch
-        with torch.no_grad():
+        # For uploaded media, downscale huge images (e.g. 4000x3000) to max 1280 before inference to prevent memory exhaustion
+        max_dim = 1280
+        if max(img_width, img_height) > max_dim:
+            scale = max_dim / max(img_width, img_height)
+            new_w, new_h = int(img_width * scale), int(img_height * scale)
+            image = image.resize((new_w, new_h), Image.Resampling.LANCZOS)
+            img_width, img_height = new_w, new_h
+
+        # Run inference using inference_mode for maximum CPU throughput and lowest memory
+        with torch.inference_mode():
             results = self._model.predict(
                 source=image,
                 conf=conf,
                 iou=settings.IOU_THRESHOLD,
-                imgsz=640,
+                imgsz=480,
                 verbose=False,
+                device="cpu",
+                half=False,
             )
 
         inference_time_ms = round((time.perf_counter() - start_time) * 1000, 2)
@@ -196,14 +231,16 @@ class ModelManager:
 
         img_width, img_height = image.size
 
-        import torch
-        with torch.no_grad():
+        # Ultra-fast 320x320 resolution for sub-100ms real-time camera telemetry on CPU
+        with torch.inference_mode():
             results = self._model.predict(
                 source=image,
                 conf=conf,
                 iou=settings.IOU_THRESHOLD,
-                imgsz=640,
+                imgsz=320,
                 verbose=False,
+                device="cpu",
+                half=False,
             )
 
         inference_time_ms = round((time.perf_counter() - start_time) * 1000, 2)
@@ -299,12 +336,16 @@ class ModelManager:
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 pil_frame = Image.fromarray(frame_rgb)
 
-                results = self._model.predict(
-                    source=pil_frame,
-                    conf=conf,
-                    iou=settings.IOU_THRESHOLD,
-                    verbose=False,
-                )
+                with torch.inference_mode():
+                    results = self._model.predict(
+                        source=pil_frame,
+                        conf=conf,
+                        iou=settings.IOU_THRESHOLD,
+                        imgsz=320,
+                        verbose=False,
+                        device="cpu",
+                        half=False,
+                    )
 
                 if results and len(results) > 0:
                     res = results[0]

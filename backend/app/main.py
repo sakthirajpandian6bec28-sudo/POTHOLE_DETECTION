@@ -89,3 +89,15 @@ app.add_exception_handler(Exception, generic_exception_handler)
 app.include_router(health.router)
 app.include_router(detect.router)
 app.include_router(potholes.router)
+
+
+@app.get("/", tags=["health"])
+@app.head("/", tags=["health"])
+async def root():
+    """Root endpoint returning 200 OK for platform health checks (Render, Cloudflare, etc.)"""
+    return {
+        "status": "healthy",
+        "service": "POTHOLE DETECTOR API",
+        "health_check": "/api/health",
+        "docs": "/docs",
+    }

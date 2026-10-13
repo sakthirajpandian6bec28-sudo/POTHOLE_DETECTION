@@ -471,6 +471,9 @@ export const DetectorPage: React.FC = () => {
       clearTimeout(fetchTimer);
 
       if (!response.ok) {
+        if (response.status === 503) {
+          throw new Error("Render detection service is currently suspended by its owner. Please resume the service in Render dashboard.");
+        }
         const errJson = await response.json().catch(() => ({}));
         throw new Error(errJson.error?.message || `HTTP ${response.status} from detection API`);
       }
@@ -605,6 +608,9 @@ export const DetectorPage: React.FC = () => {
       });
 
       if (!response.ok) {
+        if (response.status === 503) {
+          throw new Error("Render detection service is currently suspended by its owner. Please resume the service in Render dashboard.");
+        }
         const errJson = await response.json().catch(() => ({}));
         throw new Error(errJson.error?.message || `HTTP ${response.status} during media analysis`);
       }

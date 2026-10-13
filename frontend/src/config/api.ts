@@ -8,9 +8,9 @@ export const DEFAULT_PRODUCTION_API_URL = "https://pothole-detection-1-43ol.onre
 
 export function getApiBaseUrl(): string {
   if (typeof window !== "undefined") {
-    const custom = localStorage.getItem("pothole_api_url");
-    if (custom && custom.trim()) {
-      return custom.trim().replace(/\/+$/, "");
+    const host = window.location.hostname;
+    if (host === "localhost" || host === "127.0.0.1") {
+      return "http://localhost:8000";
     }
   }
 
@@ -20,9 +20,9 @@ export function getApiBaseUrl(): string {
   }
 
   if (typeof window !== "undefined") {
-    const host = window.location.hostname;
-    if (host === "localhost" || host === "127.0.0.1") {
-      return "http://localhost:8000";
+    const custom = localStorage.getItem("pothole_api_url");
+    if (custom && custom.trim() && custom.startsWith("http")) {
+      return custom.trim().replace(/\/+$/, "");
     }
   }
 
@@ -71,12 +71,16 @@ export async function checkApiHealth(baseUrl?: string): Promise<{
     const elapsed = Math.round(performance.now() - start);
 
     if (!res.ok) {
+      const msg =
+        res.status === 503
+          ? "Render backend is suspended by its owner. Please resume the service in Render dashboard."
+          : `Backend responded with HTTP ${res.status} ${res.statusText}`;
       return {
         ok: false,
         status: `HTTP ${res.status}`,
         modelReady: false,
         latencyMs: elapsed,
-        message: `Backend responded with HTTP ${res.status} ${res.statusText}`,
+        message: msg,
       };
     }
 

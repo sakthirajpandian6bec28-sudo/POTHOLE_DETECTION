@@ -1,13 +1,5 @@
 import React, { useState, useEffect, useCallback } from "react";
 import {
-  MapContainer,
-  TileLayer,
-  Marker,
-  Popup,
-  useMap,
-} from "react-leaflet";
-import L from "leaflet";
-import {
   MapPin,
   RefreshCw,
   Trash2,
@@ -24,84 +16,12 @@ import {
   PageHeader,
   Alert,
   Spinner,
+  GoogleMapView,
+  PotholeItem,
 } from "../components";
 import { mapContent } from "../config/content/map";
 import { siteConfig } from "../config/site.config";
 import { getApiBaseUrl } from "../config/api";
-
-interface PotholeItem {
-  id: number;
-  latitude: number | null;
-  longitude: number | null;
-  confidence: number;
-  severity: string;
-  class_name: string;
-  box_x1: number | null;
-  box_y1: number | null;
-  box_x2: number | null;
-  box_y2: number | null;
-  image_path: string | null;
-  timestamp: string;
-  is_demo: boolean;
-  notes: string | null;
-}
-
-// Controller component to smoothly pan map when a row or marker is selected
-const MapController: React.FC<{ center: [number, number] | null }> = ({ center }) => {
-  const map = useMap();
-  useEffect(() => {
-    if (center) {
-      map.flyTo(center, 16, { duration: 1.2 });
-    }
-  }, [center, map]);
-  return null;
-};
-
-// SVG-based custom severity markers using token colors and dark text
-const createSeverityIcon = (severity: string) => {
-  // Uses tokens: sev-low, sev-medium, sev-high with soft backgrounds and dark ink-900 text
-  let color = "var(--color-ink-900)";
-  let bg = "var(--color-sev-low-soft)";
-  let borderColor = "var(--color-sev-low)";
-
-  if (severity === "medium") {
-    color = "var(--color-ink-900)";
-    bg = "var(--color-sev-medium-soft)";
-    borderColor = "var(--color-sev-medium)";
-  } else if (severity === "high") {
-    color = "var(--color-ink-900)";
-    bg = "var(--color-sev-high-soft)";
-    borderColor = "var(--color-sev-high)";
-  }
-
-  const svgHtml = `
-    <div style="
-      background-color: ${bg};
-      border: 2px solid ${borderColor};
-      color: ${color};
-      width: 28px;
-      height: 28px;
-      border-radius: 50%;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      box-shadow: 0 1px 3px rgba(11, 18, 32, 0.2);
-      font-weight: 700;
-      font-size: 11px;
-      font-family: Inter, sans-serif;
-    ">
-      !
-    </div>
-  `;
-
-  return L.divIcon({
-    html: svgHtml,
-    className: "custom-severity-marker",
-    iconSize: [28, 28],
-    iconAnchor: [14, 14],
-    popupAnchor: [0, -14],
-  });
-};
 
 export const MapPage: React.FC = () => {
   const [potholes, setPotholes] = useState<PotholeItem[]>([]);
@@ -194,15 +114,6 @@ export const MapPage: React.FC = () => {
   const highCount = potholes.filter((p) => p.severity === "high").length;
   const mediumCount = potholes.filter((p) => p.severity === "medium").length;
   const lowCount = potholes.filter((p) => p.severity === "low").length;
-
-  const validGpsPotholes = potholes.filter(
-    (p) => p.latitude !== null && p.longitude !== null
-  );
-
-  const defaultCenter: [number, number] = [
-    siteConfig.mapDefault.lat,
-    siteConfig.mapDefault.lng,
-  ];
 
   return (
     <div className="max-w-content mx-auto w-full px-4 md:px-6 py-8 md:py-12 space-y-8">
@@ -368,7 +279,7 @@ export const MapPage: React.FC = () => {
         </div>
       </div>
 
-      {/* Map Viewport Container with Legend */}
+      {/* Google Maps Viewport Container with Custom Severity Markers & Controls */}
       <Card padding="none" className="overflow-hidden border border-border-default shadow-card">
         <div className="h-[480px] md:h-[560px] w-full relative">
           {isLoading && potholes.length === 0 ? (
@@ -377,99 +288,13 @@ export const MapPage: React.FC = () => {
             </div>
           ) : null}
 
-          {/* Map Legend per requirement */}
-          <div className="absolute bottom-4 left-4 z-[400] bg-bg-surface border border-border-default rounded p-2.5 shadow-card flex items-center gap-3 text-caption font-medium">
-            <span className="text-text-muted font-semibold">Severity:</span>
-            <div className="flex items-center gap-1.5">
-              <span className="w-3 h-3 rounded-full bg-sev-low-soft border border-sev-low inline-block" />
-              <span className="text-ink-900">Low</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="w-3 h-3 rounded-full bg-sev-medium-soft border border-sev-medium inline-block" />
-              <span className="text-ink-900">Medium</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="w-3 h-3 rounded-full bg-sev-high-soft border border-danger inline-block" />
-              <span className="text-ink-900">High</span>
-            </div>
-          </div>
-
-          <MapContainer
-            center={defaultCenter}
-            zoom={siteConfig.mapDefault.zoom}
-            scrollWheelZoom={true}
-            className="w-full h-full z-0"
-          >
-            <TileLayer
-              attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-              url="https://{s}.tile.openstreetmap.org/{z}/{x}.png"
-            />
-
-            <MapController center={panTarget} />
-
-            {validGpsPotholes.map((item) => (
-              <Marker
-                key={item.id}
-                position={[item.latitude!, item.longitude!]}
-                icon={createSeverityIcon(item.severity)}
-              >
-                <Popup>
-                  <div className="p-1 space-y-2 text-ink-900 font-sans min-w-[200px]">
-                    <div className="flex items-center justify-between border-b border-border-default pb-1.5">
-                      <span className="font-semibold text-small">Pothole #{item.id}</span>
-                      <Badge
-                        size="sm"
-                        variant={
-                          item.severity === "high"
-                            ? "severity-high"
-                            : item.severity === "medium"
-                            ? "severity-medium"
-                            : "severity-low"
-                        }
-                      >
-                        {item.severity.toUpperCase()}
-                      </Badge>
-                    </div>
-
-                    <div className="space-y-1 text-small">
-                      <div className="flex justify-between">
-                        <span className="text-text-muted">{mapContent.popup.confidenceLabel}:</span>
-                        <span className="font-medium text-ink-900">{Math.round(item.confidence * 100)}%</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-text-muted">{mapContent.popup.coordinatesLabel}:</span>
-                        <span className="font-mono text-caption text-text-body">
-                          {item.latitude?.toFixed(4)}, {item.longitude?.toFixed(4)}
-                        </span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-text-muted">{mapContent.popup.loggedAtLabel}:</span>
-                        <span className="text-caption text-text-body">
-                          {new Date(item.timestamp).toLocaleDateString()} {new Date(item.timestamp).toLocaleTimeString()}
-                        </span>
-                      </div>
-                      {item.notes && (
-                        <div className="pt-1 text-caption text-text-muted italic border-t border-border-default">
-                          {item.notes}
-                        </div>
-                      )}
-                    </div>
-
-                    <div className="pt-2 border-t border-border-default">
-                      <button
-                        type="button"
-                        onClick={() => deletePothole(item.id)}
-                        className="w-full min-h-[44px] py-2 px-3 rounded text-caption font-medium bg-sev-high-soft text-ink-900 hover:bg-danger hover:text-white border border-danger transition-colors flex items-center justify-center gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                        <span>{mapContent.popup.deleteButton}</span>
-                      </button>
-                    </div>
-                  </div>
-                </Popup>
-              </Marker>
-            ))}
-          </MapContainer>
+          <GoogleMapView
+            potholes={potholes}
+            panTarget={panTarget}
+            defaultCenter={{ lat: siteConfig.mapDefault.lat, lng: siteConfig.mapDefault.lng }}
+            defaultZoom={siteConfig.mapDefault.zoom}
+            onDeletePothole={deletePothole}
+          />
         </div>
       </Card>
 

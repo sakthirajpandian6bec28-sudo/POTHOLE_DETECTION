@@ -2,7 +2,7 @@ import os
 import io
 import uuid
 import base64
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 from fastapi import APIRouter, UploadFile, File, Form, Depends, Request
@@ -167,25 +167,38 @@ async def detect_live_frame(
     )
 
     logged_ids = []
-    if payload.auto_log and len(detections) > 0:
-        for det in detections:
-            pothole = Pothole(
-                latitude=payload.latitude,
-                longitude=payload.longitude,
-                confidence=det.confidence,
-                severity=det.severity,
-                class_name=det.class_name,
-                box_x1=det.box[0],
-                box_y1=det.box[1],
-                box_x2=det.box[2],
-                box_y2=det.box[3],
-                timestamp=datetime.utcnow(),
-                is_demo=False,
-                notes="Live camera detection",
+    if payload.auto_log and len(detections) > 0 and payload.latitude is not None and payload.longitude is not None:
+        recent_threshold = datetime.utcnow() - timedelta(seconds=15)
+        # Suppress duplicate entries within ~15 meters (0.00015 deg lat/lng) within 15s
+        recent_nearby = (
+            db.query(Pothole)
+            .filter(
+                Pothole.timestamp >= recent_threshold,
+                Pothole.latitude.between(payload.latitude - 0.00015, payload.latitude + 0.00015),
+                Pothole.longitude.between(payload.longitude - 0.00015, payload.longitude + 0.00015),
             )
-            db.add(pothole)
-        db.commit()
-        logged_ids = [1]
+            .first()
+        )
+
+        if not recent_nearby:
+            for det in detections:
+                pothole = Pothole(
+                    latitude=payload.latitude,
+                    longitude=payload.longitude,
+                    confidence=det.confidence,
+                    severity=det.severity,
+                    class_name=det.class_name,
+                    box_x1=det.box[0],
+                    box_y1=det.box[1],
+                    box_x2=det.box[2],
+                    box_y2=det.box[3],
+                    timestamp=datetime.utcnow(),
+                    is_demo=False,
+                    notes="Live camera detection",
+                )
+                db.add(pothole)
+            db.commit()
+            logged_ids = [1]
 
     return LiveFrameResponse(
         total_detections=len(detections),
@@ -275,23 +288,35 @@ async def detect_ip_stream(
     )
 
     if payload.auto_log and len(detections) > 0 and payload.latitude is not None and payload.longitude is not None:
-        for det in detections:
-            pothole = Pothole(
-                latitude=payload.latitude,
-                longitude=payload.longitude,
-                confidence=det.confidence,
-                severity=det.severity,
-                class_name=det.class_name,
-                box_x1=det.box[0],
-                box_y1=det.box[1],
-                box_x2=det.box[2],
-                box_y2=det.box[3],
-                timestamp=datetime.utcnow(),
-                is_demo=False,
-                notes="IP camera stream detection",
+        recent_threshold = datetime.utcnow() - timedelta(seconds=15)
+        recent_nearby = (
+            db.query(Pothole)
+            .filter(
+                Pothole.timestamp >= recent_threshold,
+                Pothole.latitude.between(payload.latitude - 0.00015, payload.latitude + 0.00015),
+                Pothole.longitude.between(payload.longitude - 0.00015, payload.longitude + 0.00015),
             )
-            db.add(pothole)
-        db.commit()
+            .first()
+        )
+
+        if not recent_nearby:
+            for det in detections:
+                pothole = Pothole(
+                    latitude=payload.latitude,
+                    longitude=payload.longitude,
+                    confidence=det.confidence,
+                    severity=det.severity,
+                    class_name=det.class_name,
+                    box_x1=det.box[0],
+                    box_y1=det.box[1],
+                    box_x2=det.box[2],
+                    box_y2=det.box[3],
+                    timestamp=datetime.utcnow(),
+                    is_demo=False,
+                    notes="IP camera stream detection",
+                )
+                db.add(pothole)
+            db.commit()
 
     frame_b64 = "data:image/jpeg;base64," + base64.b64encode(frame_bytes).decode("utf-8")
 

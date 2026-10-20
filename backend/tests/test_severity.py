@@ -41,3 +41,25 @@ def test_compute_severity_clamping():
     # Out of bounds values should clamp without error
     assert compute_severity(-0.5, 1.5, low_max=0.02, medium_max=0.08) == "low"
     assert compute_severity(2.0, 2.0, low_max=0.02, medium_max=0.08) == "high"
+
+
+def test_is_valid_pothole_geometry_filters():
+    from app.services.severity import is_valid_pothole_geometry
+
+    # Valid road pothole: 120x80 in 1280x720, conf 0.65 -> True
+    assert is_valid_pothole_geometry([100, 100, 220, 180], 1280, 720, 0.65) is True
+
+    # Reject tiny sensor speck (< 10px) -> False
+    assert is_valid_pothole_geometry([10, 10, 15, 15], 1280, 720, 0.50) is False
+
+    # Reject extreme horizontal crack / wire (aspect ratio > 5.0) -> False
+    assert is_valid_pothole_geometry([50, 100, 600, 120], 1280, 720, 0.70) is False
+
+    # Reject extreme vertical streak / pole / glare (aspect ratio < 0.2) -> False
+    assert is_valid_pothole_geometry([100, 50, 120, 600], 1280, 720, 0.70) is False
+
+    # Reject full image shadow covering 80% of frame -> False
+    assert is_valid_pothole_geometry([10, 10, 1200, 700], 1280, 720, 0.60) is False
+
+    # Reject low-confidence tiny speck (< 0.35 confidence with tiny footprint) -> False
+    assert is_valid_pothole_geometry([100, 100, 120, 120], 1920, 1080, 0.28) is False

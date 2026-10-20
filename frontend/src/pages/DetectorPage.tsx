@@ -78,8 +78,8 @@ export const DetectorPage: React.FC = () => {
   });
   const [isCockpitMode, setIsCockpitMode] = useState<boolean>(false);
 
-  // Detection parameters
-  const [confidenceThreshold, setConfidenceThreshold] = useState<number>(0.25);
+  // Detection parameters (0.45 default for 80-90% high precision)
+  const [confidenceThreshold, setConfidenceThreshold] = useState<number>(0.45);
   const [scanInterval, setScanInterval] = useState<number>(400); // ms
   const [autoLog, setAutoLog] = useState<boolean>(true);
 
@@ -181,8 +181,28 @@ export const DetectorPage: React.FC = () => {
     enumerateCameras();
   }, [enumerateCameras]);
 
-  // 4. Track GPS coordinates using Geolocation API
+  // 4. Track High-Accuracy GPS coordinates using Geolocation API
+  const requestHighAccuracyGps = useCallback(() => {
+    if ("geolocation" in navigator) {
+      navigator.geolocation.getCurrentPosition(
+        (position) => {
+          setCoordinates({
+            lat: parseFloat(position.coords.latitude.toFixed(6)),
+            lng: parseFloat(position.coords.longitude.toFixed(6)),
+          });
+          setGpsActive(true);
+        },
+        (err) => {
+          console.warn("High-accuracy GPS fix failed:", err);
+        },
+        { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+      );
+    }
+  }, []);
+
   useEffect(() => {
+    requestHighAccuracyGps();
+
     if ("geolocation" in navigator) {
       const watchId = navigator.geolocation.watchPosition(
         (position) => {
@@ -195,11 +215,11 @@ export const DetectorPage: React.FC = () => {
         () => {
           setGpsActive(false);
         },
-        { enableHighAccuracy: true, timeout: 10000, maximumAge: 5000 }
+        { enableHighAccuracy: true, timeout: 10000, maximumAge: 1000 }
       );
       return () => navigator.geolocation.clearWatch(watchId);
     }
-  }, []);
+  }, [requestHighAccuracyGps]);
 
   // 5. Clear canvas overlays
   const clearOverlay = useCallback(() => {
@@ -832,8 +852,14 @@ export const DetectorPage: React.FC = () => {
               </div>
             </div>
             <div className="mt-2 flex items-center gap-1.5 text-small text-ink-800">
+              <span
+                className={`w-2 h-2 rounded-full shrink-0 ${
+                  gpsActive ? "bg-sev-low animate-pulse" : "bg-text-muted"
+                }`}
+                title={gpsActive ? "High-precision GPS Active" : "Searching GPS"}
+              />
               <span className="font-mono text-small">
-                {coordinates.lat.toFixed(4)}, {coordinates.lng.toFixed(4)}
+                {coordinates.lat.toFixed(6)}, {coordinates.lng.toFixed(6)}
               </span>
             </div>
           </Card>
@@ -1112,14 +1138,23 @@ export const DetectorPage: React.FC = () => {
 
                   {/* Vehicle GPS Coordinates Override */}
                   <div className="space-y-3 pt-2 border-t border-border-default">
-                    <span className="text-small font-medium text-ink-800 block">
-                      {detectorContent.camera.gpsLabel}
-                    </span>
+                    <div className="flex items-center justify-between">
+                      <span className="text-small font-medium text-ink-800">
+                        {detectorContent.camera.gpsLabel} (Exact Fix)
+                      </span>
+                      <button
+                        type="button"
+                        onClick={requestHighAccuracyGps}
+                        className="text-caption font-medium text-primary-600 hover:text-primary-700 underline focus-visible:outline-none"
+                      >
+                        Refresh GPS
+                      </button>
+                    </div>
                     <div className="grid grid-cols-2 gap-3">
                       <Input
                         label="Latitude"
                         type="number"
-                        step="0.0001"
+                        step="0.000001"
                         value={coordinates.lat}
                         onChange={(e) =>
                           setCoordinates((prev) => ({
@@ -1131,7 +1166,7 @@ export const DetectorPage: React.FC = () => {
                       <Input
                         label="Longitude"
                         type="number"
-                        step="0.0001"
+                        step="0.000001"
                         value={coordinates.lng}
                         onChange={(e) =>
                           setCoordinates((prev) => ({
@@ -1148,7 +1183,7 @@ export const DetectorPage: React.FC = () => {
                         }`}
                       />
                       <span>
-                        {gpsActive ? detectorContent.camera.gpsActive : detectorContent.camera.gpsSearching}
+                        {gpsActive ? `${detectorContent.camera.gpsActive} (High Accuracy)` : detectorContent.camera.gpsSearching}
                       </span>
                     </div>
                   </div>

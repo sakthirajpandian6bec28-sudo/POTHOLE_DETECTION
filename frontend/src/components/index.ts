@@ -7,3 +7,4 @@ export * from "./PageHeader";
 export * from "./Alert";
 export * from "./Spinner";
 export * from "./EmptyState";
+export * from "./GoogleMapView";

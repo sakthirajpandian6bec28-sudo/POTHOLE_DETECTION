@@ -23,12 +23,16 @@ try:
 except Exception:
     pass
 
-from PIL import Image
+from PIL import Image, ImageDraw
 import numpy as np
 
 from app.core.settings import settings
 from app.core.errors import ModelNotReadyException
-from app.services.severity import calculate_box_area_ratio, compute_severity
+from app.services.severity import (
+    calculate_box_area_ratio,
+    compute_severity,
+    is_valid_pothole_geometry,
+)
 from app.models.schemas import DetectionItem, DetectionResponse
 
 logger = logging.getLogger("pothole_api")
@@ -157,23 +161,10 @@ class ModelManager:
 
         detections: List[DetectionItem] = []
         severity_counts = {"low": 0, "medium": 0, "high": 0}
-
         annotated_base64: Optional[str] = None
 
         if results and len(results) > 0:
             result = results[0]
-
-            # Generate annotated image
-            plotted_bgr = result.plot()  # numpy array BGR
-            # Convert BGR to RGB
-            plotted_rgb = plotted_bgr[:, :, ::-1]
-            annotated_pil = Image.fromarray(plotted_rgb)
-
-            buffer = io.BytesIO()
-            annotated_pil.save(buffer, format="JPEG", quality=85)
-            b64_str = base64.b64encode(buffer.getvalue()).decode("utf-8")
-            annotated_base64 = f"data:image/jpeg;base64,{b64_str}"
-
             if result.boxes is not None and len(result.boxes) > 0:
                 boxes = result.boxes.xyxy.cpu().numpy()
                 confs = result.boxes.conf.cpu().numpy()
@@ -184,6 +175,11 @@ class ModelManager:
                     class_name = self._class_names.get(cls_int, f"class_{cls_int}")
 
                     box_coords = [round(float(c), 2) for c in box]
+
+                    # 80-90% precision filter: reject tiny noise, crazy aspect ratios, full shadows
+                    if not is_valid_pothole_geometry(box_coords, img_width, img_height, float(score)):
+                        continue
+
                     area_ratio = calculate_box_area_ratio(box_coords, img_width, img_height)
                     severity = compute_severity(area_ratio, float(score))
 
@@ -199,6 +195,37 @@ class ModelManager:
                             severity=severity,
                         )
                     )
+
+            # Draw only verified detections onto preview image
+            annotated_pil = image.copy()
+            draw = ImageDraw.Draw(annotated_pil)
+            sev_colors = {
+                "high": (220, 38, 38),     # #DC2626
+                "medium": (217, 119, 6),   # #D97706
+                "low": (21, 128, 61),      # #15803D
+            }
+
+            for det in detections:
+                x1, y1, x2, y2 = det.box
+                box_color = sev_colors.get(det.severity, (21, 128, 61))
+                # 3px border
+                for offset in range(3):
+                    draw.rectangle(
+                        [max(0.0, x1 - offset), max(0.0, y1 - offset), min(float(img_width), x2 + offset), min(float(img_height), y2 + offset)],
+                        outline=box_color,
+                    )
+                conf_pct = int(det.confidence * 100)
+                label = f"{det.class_name} {conf_pct}% [{det.severity.upper()}]"
+                banner_w = len(label) * 8 + 10
+                banner_y1 = max(0.0, y1 - 20)
+                banner_y2 = max(banner_y1 + 18, y1)
+                draw.rectangle([x1, banner_y1, min(float(img_width), x1 + banner_w), banner_y2], fill=box_color)
+                draw.text((x1 + 4, banner_y1 + 2), label, fill=(255, 255, 255))
+
+            buffer = io.BytesIO()
+            annotated_pil.save(buffer, format="JPEG", quality=85)
+            b64_str = base64.b64encode(buffer.getvalue()).decode("utf-8")
+            annotated_base64 = f"data:image/jpeg;base64,{b64_str}"
 
         return DetectionResponse(
             total_detections=len(detections),
@@ -258,9 +285,14 @@ class ModelManager:
                 classes = result.boxes.cls.cpu().numpy()
 
                 for box, score, cls_id in zip(boxes, confs, classes):
+                    box_coords = [round(float(c), 2) for c in box]
+
+                    # 80-90% precision filter: reject tiny noise, crazy aspect ratios, full shadows
+                    if not is_valid_pothole_geometry(box_coords, img_width, img_height, float(score)):
+                        continue
+
                     cls_int = int(cls_id)
                     class_name = self._class_names.get(cls_int, f"class_{cls_int}")
-                    box_coords = [round(float(c), 2) for c in box]
                     area_ratio = calculate_box_area_ratio(box_coords, img_width, img_height)
                     severity = compute_severity(area_ratio, float(score))
 
@@ -360,9 +392,13 @@ class ModelManager:
                             best_annotated_frame = res.plot()[:, :, ::-1]
 
                         for box, score, cls_id in zip(boxes, confs, classes):
+                            box_coords = [round(float(c), 2) for c in box]
+                            # 80-90% precision filter: reject tiny noise, extreme aspect ratio cracks, full shadows
+                            if not is_valid_pothole_geometry(box_coords, width, height, float(score)):
+                                continue
+
                             cls_int = int(cls_id)
                             class_name = self._class_names.get(cls_int, f"class_{cls_int}")
-                            box_coords = [round(float(c), 2) for c in box]
                             area_ratio = calculate_box_area_ratio(box_coords, width, height)
                             sev = compute_severity(area_ratio, float(score))
 

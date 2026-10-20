@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     DEBUG: bool = False
 
     MODEL_PATH: str = "models/best.pt"
-    CONFIDENCE_THRESHOLD: float = 0.25
+    CONFIDENCE_THRESHOLD: float = 0.45
     IOU_THRESHOLD: float = 0.45
 
     MAX_UPLOAD_SIZE_MB: int = 25

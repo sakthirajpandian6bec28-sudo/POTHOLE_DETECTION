@@ -13,6 +13,9 @@ import {
   Check,
   Maximize2,
   Minimize2,
+  Smartphone,
+  Wifi,
+  RefreshCw,
 } from "lucide-react";
 
 import {
@@ -60,14 +63,30 @@ interface UploadResult {
 }
 
 export const DetectorPage: React.FC = () => {
-  // Page mode: Live Camera vs Media Upload
-  const [activeTab, setActiveTab] = useState<"camera" | "upload">("camera");
+  // Page mode: Live Camera (Webcam/DroidCam Client) vs Wi-Fi IP Stream vs Media Upload
+  const [activeTab, setActiveTab] = useState<"camera" | "ipcam" | "upload">("camera");
 
   // Camera feed states
   const [isStreaming, setIsStreaming] = useState(false);
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>("");
   const [facingMode, setFacingMode] = useState<"environment" | "user">("environment");
+
+  // DroidCam Detection helper
+  const droidCamDevice = devices.find(
+    (d) => d.label && d.label.toLowerCase().includes("droidcam")
+  );
+  const isDroidCamActive = Boolean(
+    droidCamDevice && selectedDeviceId === droidCamDevice.deviceId
+  );
+
+  // Wi-Fi IP Camera / DroidCam Stream state
+  const [ipStreamUrl, setIpStreamUrl] = useState<string>("http://192.168.29.:4747");
+  const [isIpStreaming, setIsIpStreaming] = useState<boolean>(false);
+  const [ipFrameBase64, setIpFrameBase64] = useState<string | null>(null);
+  const isIpStreamingRef = useRef<boolean>(false);
+  isIpStreamingRef.current = isIpStreaming;
+  const ipLoopTimeoutRef = useRef<number | null>(null);
 
   // Phone Orientation & Cockpit Landscape Mode
   const [isLandscape, setIsLandscape] = useState<boolean>(() => {
@@ -160,7 +179,7 @@ export const DetectorPage: React.FC = () => {
     runCheck();
   }, []);
 
-  // 3. Enumerate video input devices
+  // 3. Enumerate video input devices & prioritize DroidCam
   const enumerateCameras = useCallback(async () => {
     try {
       if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
@@ -169,16 +188,46 @@ export const DetectorPage: React.FC = () => {
       const devList = await navigator.mediaDevices.enumerateDevices();
       const videoInputs = devList.filter((d) => d.kind === "videoinput");
       setDevices(videoInputs);
-      if (videoInputs.length > 0 && !selectedDeviceId) {
-        setSelectedDeviceId(videoInputs[0].deviceId);
+
+      // Detect DroidCam (e.g. "DroidCam Video", "DroidCam Source 2", "DroidCam Source 3")
+      const droidCam = videoInputs.find(
+        (d) => d.label && d.label.toLowerCase().includes("droidcam")
+      );
+
+      // Prioritize DroidCam if detected and user hasn't explicitly locked onto another camera
+      if (droidCam) {
+        setSelectedDeviceId((current) => {
+          if (!current || !videoInputs.some((v) => v.deviceId === current)) {
+            return droidCam.deviceId;
+          }
+          return current;
+        });
+      } else if (videoInputs.length > 0) {
+        setSelectedDeviceId((current) => {
+          if (!current || !videoInputs.some((v) => v.deviceId === current)) {
+            return videoInputs[0].deviceId;
+          }
+          return current;
+        });
       }
     } catch (err) {
       console.warn("Could not enumerate video devices:", err);
     }
-  }, [selectedDeviceId]);
+  }, []);
 
   useEffect(() => {
     enumerateCameras();
+
+    // Listen to USB and Virtual Webcam device changes (like DroidCam Client connecting)
+    if (navigator.mediaDevices && "addEventListener" in navigator.mediaDevices) {
+      const handleDeviceChange = () => {
+        enumerateCameras();
+      };
+      navigator.mediaDevices.addEventListener("devicechange", handleDeviceChange);
+      return () => {
+        navigator.mediaDevices.removeEventListener("devicechange", handleDeviceChange);
+      };
+    }
   }, [enumerateCameras]);
 
   // 4. Track High-Accuracy GPS coordinates using Geolocation API
@@ -232,13 +281,14 @@ export const DetectorPage: React.FC = () => {
     }
   }, []);
 
-  // 6. Start camera stream with orientation optimization
-  const startCamera = async (overrideFacingMode?: "environment" | "user") => {
+  // 6. Start camera stream with orientation optimization & DroidCam support
+  const startCamera = async (overrideFacingMode?: "environment" | "user", overrideDeviceId?: string) => {
     setErrorMessage(null);
     setApiErrorMessage(null);
     consecutiveErrorsRef.current = 0;
 
     const targetFacing = overrideFacingMode || facingMode;
+    const targetDeviceId = overrideDeviceId !== undefined ? overrideDeviceId : selectedDeviceId;
 
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       setErrorMessage(detectorContent.camera.permissionError);
@@ -253,10 +303,10 @@ export const DetectorPage: React.FC = () => {
 
     try {
       const useWide = isLandscape || isCockpitMode;
-      const constraints: MediaStreamConstraints = {
-        video: selectedDeviceId && !overrideFacingMode
+      let constraints: MediaStreamConstraints = {
+        video: targetDeviceId && !overrideFacingMode
           ? {
-              deviceId: { exact: selectedDeviceId },
+              deviceId: { exact: targetDeviceId },
               width: { ideal: useWide ? 1920 : 1280 },
               height: { ideal: useWide ? 1080 : 720 },
             }
@@ -268,7 +318,22 @@ export const DetectorPage: React.FC = () => {
         audio: false,
       };
 
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia(constraints);
+      } catch (err: unknown) {
+        // Fallback without exact deviceId constraint if device configuration changed
+        if (targetDeviceId) {
+          constraints = {
+            video: { deviceId: targetDeviceId },
+            audio: false,
+          };
+          stream = await navigator.mediaDevices.getUserMedia(constraints);
+        } else {
+          throw err;
+        }
+      }
+
       mediaStreamRef.current = stream;
 
       if (videoRef.current) {
@@ -315,12 +380,99 @@ export const DetectorPage: React.FC = () => {
     clearOverlay();
   }, [clearOverlay]);
 
+  // Stop Wi-Fi DroidCam / IP camera stream
+  const stopIpStream = useCallback(() => {
+    if (ipLoopTimeoutRef.current) {
+      window.clearTimeout(ipLoopTimeoutRef.current);
+      ipLoopTimeoutRef.current = null;
+    }
+    setIsIpStreaming(false);
+    setIpFrameBase64(null);
+    setActivePotholesCount(0);
+    setMaxSeverity(null);
+  }, []);
+
+  // Process IP camera / DroidCam stream frame from backend
+  const processIpFrame = useCallback(async () => {
+    if (!isIpStreamingRef.current) return;
+
+    try {
+      const apiUrl = getApiBaseUrl();
+      const response = await fetch(`${apiUrl}/api/detect/ip-stream`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          stream_url: ipStreamUrl,
+          confidence_threshold: confidenceThreshold,
+          latitude: coordinates.lat,
+          longitude: coordinates.lng,
+          auto_log: autoLog,
+        }),
+      });
+
+      if (!response.ok) {
+        const errJson = await response.json().catch(() => ({}));
+        throw new Error(errJson.error?.message || `HTTP ${response.status} connecting to DroidCam stream`);
+      }
+
+      const data = await response.json();
+      setLatencyMs(data.inference_time_ms);
+      setActivePotholesCount(data.total_detections);
+      setMaxSeverity(data.highest_severity);
+      setIpFrameBase64(data.frame_base64);
+
+      if (data.total_detections > 0 && autoLog) {
+        const timeStr = new Date().toLocaleTimeString();
+        setDetectionLogs((prev) => [
+          {
+            id: `${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+            timestamp: timeStr,
+            count: data.total_detections,
+            maxSeverity: data.highest_severity || "low",
+            confidence: Math.max(...data.detections.map((d: { confidence: number }) => d.confidence)),
+            latitude: coordinates.lat,
+            longitude: coordinates.lng,
+            savedToDb: true,
+          },
+          ...prev.slice(0, 24),
+        ]);
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setErrorMessage(msg);
+      setIsIpStreaming(false);
+      return;
+    }
+
+    if (isIpStreamingRef.current) {
+      ipLoopTimeoutRef.current = window.setTimeout(processIpFrame, scanInterval);
+    }
+  }, [ipStreamUrl, confidenceThreshold, coordinates.lat, coordinates.lng, autoLog, scanInterval]);
+
+  useEffect(() => {
+    if (isIpStreaming) {
+      processIpFrame();
+    } else {
+      if (ipLoopTimeoutRef.current) {
+        window.clearTimeout(ipLoopTimeoutRef.current);
+        ipLoopTimeoutRef.current = null;
+      }
+    }
+    return () => {
+      if (ipLoopTimeoutRef.current) {
+        window.clearTimeout(ipLoopTimeoutRef.current);
+        ipLoopTimeoutRef.current = null;
+      }
+    };
+  }, [isIpStreaming, processIpFrame]);
+
   // Clean up on component unmount
   useEffect(() => {
     return () => {
       stopCamera();
+      stopIpStream();
     };
-  }, [stopCamera]);
+  }, [stopCamera, stopIpStream]);
 
   // 8. Toggle between rear environment camera and front selfie camera
   const toggleFacingMode = () => {
@@ -865,21 +1017,45 @@ export const DetectorPage: React.FC = () => {
           </Card>
         </div>
 
-        {/* Tab Selection Header (Live Camera vs Upload Inspection) */}
-        <div className="border-b border-border-default flex gap-6">
+        {/* Tab Selection Header (Live Camera vs Wi-Fi DroidCam vs Upload Inspection) */}
+        <div className="border-b border-border-default flex gap-6 overflow-x-auto">
           <button
             type="button"
             onClick={() => {
-              if (activeTab !== "camera") setActiveTab("camera");
+              if (activeTab !== "camera") {
+                stopIpStream();
+                setActiveTab("camera");
+              }
             }}
-            className={`pb-3 text-body font-medium border-b-2 transition-colors flex items-center gap-2 ${
+            className={`pb-3 text-body font-medium border-b-2 transition-colors flex items-center gap-2 whitespace-nowrap ${
               activeTab === "camera"
                 ? "border-primary-600 text-primary-600 font-semibold"
                 : "border-transparent text-text-muted hover:text-ink-900"
             }`}
           >
             <Camera className="w-5 h-5" />
-            <span>{detectorContent.camera.hardwareTabBrowser}</span>
+            <span>Camera (Webcam / DroidCam Client)</span>
+            {droidCamDevice && (
+              <span className="w-2 h-2 rounded-full bg-sev-low animate-pulse" title="DroidCam available" />
+            )}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              if (activeTab !== "ipcam") {
+                stopCamera();
+                setActiveTab("ipcam");
+              }
+            }}
+            className={`pb-3 text-body font-medium border-b-2 transition-colors flex items-center gap-2 whitespace-nowrap ${
+              activeTab === "ipcam"
+                ? "border-primary-600 text-primary-600 font-semibold"
+                : "border-transparent text-text-muted hover:text-ink-900"
+            }`}
+          >
+            <Wifi className="w-5 h-5" />
+            <span>Wi-Fi DroidCam / IP Stream</span>
           </button>
 
           <button
@@ -887,10 +1063,11 @@ export const DetectorPage: React.FC = () => {
             onClick={() => {
               if (activeTab !== "upload") {
                 stopCamera();
+                stopIpStream();
                 setActiveTab("upload");
               }
             }}
-            className={`pb-3 text-body font-medium border-b-2 transition-colors flex items-center gap-2 ${
+            className={`pb-3 text-body font-medium border-b-2 transition-colors flex items-center gap-2 whitespace-nowrap ${
               activeTab === "upload"
                 ? "border-primary-600 text-primary-600 font-semibold"
                 : "border-transparent text-text-muted hover:text-ink-900"
@@ -1063,28 +1240,103 @@ export const DetectorPage: React.FC = () => {
             <div className={`space-y-6 ${isWideFormat ? "lg:col-span-3" : ""}`}>
               <Card title="Sensor & vehicle calibration" subtitle="Live stream parameters and GPS positioning">
                 <div className="space-y-5">
-                  {/* Video Input Device Picker */}
-                  <div>
-                    <label className="block text-small font-medium text-ink-800 mb-1.5">
-                      {detectorContent.camera.deviceSelectLabel}
-                    </label>
+                  {/* Video Input Device Picker with DroidCam Integration */}
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <label className="block text-small font-medium text-ink-800">
+                        {detectorContent.camera.deviceSelectLabel}
+                      </label>
+                      <button
+                        type="button"
+                        onClick={enumerateCameras}
+                        className="text-caption font-medium text-primary-600 hover:text-primary-700 flex items-center gap-1 underline focus-visible:outline-none"
+                        title="Scan system for newly connected cameras or DroidCam"
+                      >
+                        <RefreshCw className="w-3 h-3" />
+                        Scan for DroidCam
+                      </button>
+                    </div>
+
+                    {/* DroidCam Status Indicator & Quick Connect */}
+                    {droidCamDevice && (
+                      <div
+                        className={`p-3 rounded border flex items-center justify-between text-small ${
+                          isDroidCamActive
+                            ? "bg-sev-low-soft border-sev-low text-ink-900"
+                            : "bg-primary-50 border-primary-200 text-ink-900"
+                        }`}
+                      >
+                        <div className="flex items-center gap-2">
+                          <Smartphone
+                            className={`w-4 h-4 ${
+                              isDroidCamActive ? "text-sev-low" : "text-primary-600"
+                            }`}
+                          />
+                          <div>
+                            <span className="font-semibold block text-small">
+                              {droidCamDevice.label || "DroidCam Video"}
+                            </span>
+                            <span className="text-caption text-text-muted">
+                              {isDroidCamActive
+                                ? "Active: Streaming from phone camera"
+                                : "Detected on PC: Click to activate"}
+                            </span>
+                          </div>
+                        </div>
+                        {!isDroidCamActive && (
+                          <Button
+                            variant="primary"
+                            size="sm"
+                            onClick={() => {
+                              setSelectedDeviceId(droidCamDevice.deviceId);
+                              if (isStreaming) {
+                                startCamera(undefined, droidCamDevice.deviceId);
+                              }
+                            }}
+                          >
+                            Use DroidCam
+                          </Button>
+                        )}
+                      </div>
+                    )}
+
                     <select
                       value={selectedDeviceId}
-                      disabled={isStreaming}
                       onChange={(e) => {
-                        setSelectedDeviceId(e.target.value);
+                        const newId = e.target.value;
+                        setSelectedDeviceId(newId);
+                        if (isStreaming) {
+                          startCamera(undefined, newId);
+                        }
                       }}
-                      className="w-full min-h-[44px] rounded border border-border-default bg-bg-surface px-3 text-body text-ink-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-600 disabled:bg-bg-page disabled:text-text-muted disabled:cursor-not-allowed"
+                      className="w-full min-h-[44px] rounded border border-border-default bg-bg-surface px-3 text-body text-ink-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-600"
                     >
                       {devices.length === 0 && (
                         <option value="">{detectorContent.camera.deviceDefaultOption}</option>
                       )}
-                      {devices.map((device, idx) => (
-                        <option key={device.deviceId || idx} value={device.deviceId}>
-                          {device.label || `Camera ${idx + 1}`}
-                        </option>
-                      ))}
+                      {devices.map((device, idx) => {
+                        const isDroid = device.label?.toLowerCase().includes("droidcam");
+                        return (
+                          <option key={device.deviceId || idx} value={device.deviceId}>
+                            {isDroid ? `📱 ${device.label} (DroidCam Phone)` : device.label || `Camera ${idx + 1}`}
+                          </option>
+                        );
+                      })}
                     </select>
+
+                    {/* DroidCam Quick Setup Instructions */}
+                    <details className="text-caption text-text-muted bg-bg-page border border-border-default rounded p-3 select-none">
+                      <summary className="font-medium text-ink-800 hover:text-primary-600 cursor-pointer flex items-center gap-1.5">
+                        <Smartphone className="w-3.5 h-3.5 text-primary-600" />
+                        <span>Using DroidCam? Quick setup steps</span>
+                      </summary>
+                      <div className="mt-2.5 space-y-1.5 pl-3 border-l-2 border-primary-600 text-ink-800">
+                        <p>1. Open <strong>DroidCam</strong> on your Android / iOS phone.</p>
+                        <p>2. Open <strong>DroidCam Client</strong> on this PC (installed &amp; running).</p>
+                        <p>3. Enter your phone&apos;s Wi-Fi IP and click <strong>Start</strong> in DroidCam Client.</p>
+                        <p>4. Click <strong>&quot;Scan for DroidCam&quot;</strong> above &mdash; <strong>DroidCam Video</strong> will stream immediately!</p>
+                      </div>
+                    </details>
                   </div>
 
                   {/* Confidence Slider */}
@@ -1193,7 +1445,139 @@ export const DetectorPage: React.FC = () => {
           </div>
         )}
 
-        {/* Mode 2: ROAD MEDIA FILE UPLOAD INSPECTION */}
+        {/* Mode 2: WI-FI DROIDCAM / IP STREAM STUDIO */}
+        {activeTab === "ipcam" && (
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+            <div className={`space-y-4 ${isWideFormat ? "lg:col-span-3" : "lg:col-span-2"}`}>
+              <div
+                className={`rounded border border-border-default shadow-card overflow-hidden bg-ink-900 relative transition-all duration-300 ${
+                  isWideFormat ? "w-full max-h-[85vh] aspect-video" : "w-full aspect-video"
+                }`}
+              >
+                <div className="relative w-full h-full flex items-center justify-center bg-ink-900 overflow-hidden">
+                  {isIpStreaming && ipFrameBase64 ? (
+                    <img
+                      src={ipFrameBase64}
+                      alt="Live DroidCam Stream Feed"
+                      className="w-full h-full object-contain"
+                    />
+                  ) : (
+                    <div className="text-center p-8 space-y-4 text-white">
+                      <div className="w-16 h-16 rounded-full bg-ink-800 border border-ink-800 flex items-center justify-center mx-auto text-accent-400">
+                        <Wifi className="w-8 h-8" aria-hidden="true" />
+                      </div>
+                      <div className="max-w-md mx-auto">
+                        <h3 className="text-h4 font-medium text-white">
+                          Wi-Fi DroidCam / IP Stream Standby
+                        </h3>
+                        <p className="text-small text-ink-400 mt-1">
+                          Connect directly to your phone&apos;s DroidCam stream over local Wi-Fi without needing USB cables or client drivers.
+                        </p>
+                      </div>
+                      <Button
+                        variant="primary"
+                        size="lg"
+                        leftIcon={<Play className="w-5 h-5 fill-current" />}
+                        onClick={() => setIsIpStreaming(true)}
+                        disabled={!ipStreamUrl.trim()}
+                      >
+                        Start DroidCam Wi-Fi Stream
+                      </Button>
+                    </div>
+                  )}
+
+                  {isIpStreaming && (
+                    <div className="absolute top-4 left-4 z-10 flex items-center gap-2 bg-ink-950/80 backdrop-blur-sm px-3 py-1.5 rounded text-white text-small">
+                      <span className="w-2.5 h-2.5 rounded-full bg-sev-low animate-pulse" />
+                      <span className="font-semibold">DROIDCAM LIVE</span>
+                      <span className="text-caption text-ink-300 font-mono truncate max-w-[200px]">
+                        {ipStreamUrl}
+                      </span>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* IP Stream Control Buttons */}
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  {!isIpStreaming ? (
+                    <Button
+                      variant="primary"
+                      size="md"
+                      leftIcon={<Play className="w-4 h-4 fill-current" />}
+                      onClick={() => setIsIpStreaming(true)}
+                      disabled={!ipStreamUrl.trim()}
+                    >
+                      Connect &amp; Scan Road
+                    </Button>
+                  ) : (
+                    <Button
+                      variant="danger"
+                      size="md"
+                      leftIcon={<Square className="w-4 h-4 fill-current" />}
+                      onClick={stopIpStream}
+                    >
+                      Stop DroidCam Stream
+                    </Button>
+                  )}
+                </div>
+
+                <div className="flex items-center gap-3">
+                  <label className="flex items-center gap-2 cursor-pointer select-none text-small font-medium text-ink-800">
+                    <input
+                      type="checkbox"
+                      checked={autoLog}
+                      onChange={(e) => setAutoLog(e.target.checked)}
+                      className="w-4 h-4 text-primary-600 rounded border-border-default focus:ring-primary-600"
+                    />
+                    <span>{detectorContent.camera.autoLogLabel}</span>
+                  </label>
+                </div>
+              </div>
+            </div>
+
+            {/* Right Column: IP Stream Parameters */}
+            <div className={`space-y-6 ${isWideFormat ? "lg:col-span-3" : ""}`}>
+              <Card title="Wi-Fi stream configuration" subtitle="Direct phone connection parameters">
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-small font-medium text-ink-800 mb-1.5">
+                      Phone DroidCam Stream URL
+                    </label>
+                    <Input
+                      type="text"
+                      value={ipStreamUrl}
+                      onChange={(e) => setIpStreamUrl(e.target.value)}
+                      placeholder="http://192.168.29.X:4747"
+                    />
+                    <p className="text-caption text-text-muted mt-1.5">
+                      Open DroidCam on your phone and copy the <strong>Wi-Fi IP</strong> and <strong>Port</strong> shown on screen.
+                    </p>
+                  </div>
+
+                  <div className="p-3 rounded bg-primary-50 border border-primary-200 text-small text-ink-900 space-y-1">
+                    <span className="font-semibold block flex items-center gap-1.5">
+                      <Smartphone className="w-4 h-4 text-primary-600" />
+                      DroidCam Direct Wi-Fi Guide
+                    </span>
+                    <p className="text-caption text-text-muted">
+                      1. Connect your phone and PC to the same Wi-Fi network.
+                    </p>
+                    <p className="text-caption text-text-muted">
+                      2. Open DroidCam on phone; check the <strong>WiFi IP</strong> (e.g. 192.168.29.X).
+                    </p>
+                    <p className="text-caption text-text-muted">
+                      3. Click <strong>Connect &amp; Scan Road</strong> to stream directly through our backend AI!
+                    </p>
+                  </div>
+                </div>
+              </Card>
+            </div>
+          </div>
+        )}
+
+        {/* Mode 3: ROAD MEDIA FILE UPLOAD INSPECTION */}
         {activeTab === "upload" && (
           <div className="space-y-8">
             <Card title="Road media inspection" subtitle="Upload pavement photos or dashcam videos to run YOLO hazard detection">

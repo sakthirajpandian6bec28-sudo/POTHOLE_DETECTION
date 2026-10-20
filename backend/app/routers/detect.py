@@ -212,24 +212,34 @@ async def detect_live_frame(
 
 def fetch_ip_camera_frame(base_url: str):
     """
-    Attempts to fetch a JPEG frame from an IP camera (e.g. Android IP Webcam).
-    Tries snapshot URLs (/shot.jpg, /photo.jpg) first for highest speed and reliability,
-    then falls back to reading a single frame from an MJPEG/RTSP stream via cv2.VideoCapture.
+    Attempts to fetch a JPEG frame from an IP camera or DroidCam stream.
+    Tries snapshot URLs (/cam/1/frame.jpg, /shot.jpg, /photo.jpg) first for highest speed and reliability,
+    then falls back to reading an MJPEG stream via cv2.VideoCapture.
     """
     clean_url = base_url.strip()
     if not clean_url.startswith(("http://", "https://", "rtsp://")):
         clean_url = "http://" + clean_url
 
+    from urllib.parse import urlparse
+    parsed = urlparse(clean_url)
+
+    urls_to_try = [clean_url]
+    # If no port specified, probe DroidCam default port 4747 and IP Webcam port 8080
+    if not parsed.port:
+        urls_to_try.append(f"{clean_url}:4747")
+        urls_to_try.append(f"{clean_url}:8080")
+
     candidates = []
-    # If the user already provided /shot.jpg or /video, put that first
-    if any(p in clean_url for p in ["/video", "/shot", "/photo", ".mjpg"]):
+    # If user provided a specific path, prioritize it
+    if any(p in clean_url for p in ["/video", "/shot", "/photo", ".mjpg", "/mjpegfeed", "/cam/"]):
         candidates.append(clean_url)
 
-    base_no_slash = clean_url.rstrip("/")
-    for path in ["/shot.jpg", "/photo.jpg", "/video", ""]:
-        u = base_no_slash + path
-        if u not in candidates:
-            candidates.append(u)
+    for base in urls_to_try:
+        base_no_slash = base.rstrip("/")
+        for path in ["/cam/1/frame.jpg", "/shot.jpg", "/photo.jpg", "/video", "/mjpegfeed", ""]:
+            u = base_no_slash + path
+            if u not in candidates:
+                candidates.append(u)
 
     for target_url in candidates:
         try:
@@ -246,27 +256,28 @@ def fetch_ip_camera_frame(base_url: str):
                     start = raw.find(b"\xff\xd8")
                     end = raw.find(b"\xff\xd9", start)
                     if start != -1 and end != -1:
-                        return raw[start:end+2], target_url
+                        return raw[start : end + 2], target_url
         except Exception:
             pass
 
-    # Fallback to OpenCV VideoCapture
-    try:
-        cap = cv2.VideoCapture(clean_url)
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        ret, frame = cap.read()
-        cap.release()
-        if ret and frame is not None:
-            _, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
-            return buffer.tobytes(), clean_url
-    except Exception:
-        pass
+    # Fallback to OpenCV VideoCapture for MJPEG / RTSP streams
+    for target_url in candidates:
+        try:
+            cap = cv2.VideoCapture(target_url)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            ret, frame = cap.read()
+            cap.release()
+            if ret and frame is not None:
+                _, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                return buffer.tobytes(), target_url
+        except Exception:
+            pass
 
     raise AppException(
         status_code=400,
         code="STREAM_UNREACHABLE",
         message=f"Could not connect to camera stream at '{base_url}'.",
-        action="Verify that: 1. You tapped 'Start server' at the bottom of the IP Webcam app. 2. Your phone is on the same Wi-Fi and its screen remains on. 3. Include the video path (e.g. :8080/video or :8080/shot.jpg).",
+        action="Verify that: 1. DroidCam is active on your phone. 2. Phone and PC are on the same Wi-Fi. 3. Enter the IP and Port shown in the DroidCam app (e.g. http://192.168.29.X:4747).",
     )
 
 

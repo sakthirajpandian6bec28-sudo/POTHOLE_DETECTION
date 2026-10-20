@@ -16,6 +16,7 @@ import {
   Smartphone,
   Wifi,
   RefreshCw,
+  AlertTriangle,
 } from "lucide-react";
 
 import {
@@ -81,12 +82,13 @@ export const DetectorPage: React.FC = () => {
   );
 
   // Wi-Fi IP Camera / DroidCam Stream state
-  const [ipStreamUrl, setIpStreamUrl] = useState<string>("http://192.168.29.:4747");
+  const [ipStreamUrl, setIpStreamUrl] = useState<string>("http://192.168.29.8:4747");
   const [isIpStreaming, setIsIpStreaming] = useState<boolean>(false);
   const [ipFrameBase64, setIpFrameBase64] = useState<string | null>(null);
   const isIpStreamingRef = useRef<boolean>(false);
   isIpStreamingRef.current = isIpStreaming;
   const ipLoopTimeoutRef = useRef<number | null>(null);
+  const [isDroidCamGreenScreen, setIsDroidCamGreenScreen] = useState<boolean>(false);
 
   // Phone Orientation & Cockpit Landscape Mode
   const [isLandscape, setIsLandscape] = useState<boolean>(() => {
@@ -289,6 +291,7 @@ export const DetectorPage: React.FC = () => {
 
     const targetFacing = overrideFacingMode || facingMode;
     const targetDeviceId = overrideDeviceId !== undefined ? overrideDeviceId : selectedDeviceId;
+    setIsDroidCamGreenScreen(false);
 
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       setErrorMessage(detectorContent.camera.permissionError);
@@ -303,20 +306,34 @@ export const DetectorPage: React.FC = () => {
 
     try {
       const useWide = isLandscape || isCockpitMode;
-      let constraints: MediaStreamConstraints = {
-        video: targetDeviceId && !overrideFacingMode
-          ? {
-              deviceId: { exact: targetDeviceId },
-              width: { ideal: useWide ? 1920 : 1280 },
-              height: { ideal: useWide ? 1080 : 720 },
-            }
-          : {
-              facingMode: { ideal: targetFacing },
-              width: { ideal: useWide ? 1920 : 1280 },
-              height: { ideal: useWide ? 1080 : 720 },
-            },
-        audio: false,
-      };
+      const targetDev = devices.find((d) => d.deviceId === targetDeviceId);
+      const isDroidCam = targetDev?.label?.toLowerCase().includes("droidcam");
+
+      let constraints: MediaStreamConstraints;
+      if (isDroidCam && targetDeviceId) {
+        // DroidCam virtual webcam: avoid rigid 1080p constraints which cause DirectShow chroma-green fallback
+        constraints = {
+          video: {
+            deviceId: { exact: targetDeviceId },
+          },
+          audio: false,
+        };
+      } else {
+        constraints = {
+          video: targetDeviceId && !overrideFacingMode
+            ? {
+                deviceId: { exact: targetDeviceId },
+                width: { ideal: useWide ? 1920 : 1280 },
+                height: { ideal: useWide ? 1080 : 720 },
+              }
+            : {
+                facingMode: { ideal: targetFacing },
+                width: { ideal: useWide ? 1920 : 1280 },
+                height: { ideal: useWide ? 1080 : 720 },
+              },
+          audio: false,
+        };
+      }
 
       let stream: MediaStream;
       try {
@@ -375,6 +392,7 @@ export const DetectorPage: React.FC = () => {
     }
 
     setIsStreaming(false);
+    setIsDroidCamGreenScreen(false);
     setActivePotholesCount(0);
     setMaxSeverity(null);
     clearOverlay();
@@ -618,6 +636,28 @@ export const DetectorPage: React.FC = () => {
       if (!ctx) return;
 
       ctx.drawImage(video, 0, 0, targetW, targetH);
+
+      // Check for DroidCam green standby / inactive test frame (bright green chroma key)
+      try {
+        const imgData = ctx.getImageData(0, 0, targetW, targetH).data;
+        const samplePoints = [
+          Math.floor((targetW * 0.5) + (targetH * 0.5) * targetW) * 4,
+          Math.floor((targetW * 0.25) + (targetH * 0.25) * targetW) * 4,
+          Math.floor((targetW * 0.75) + (targetH * 0.25) * targetW) * 4,
+          Math.floor((targetW * 0.25) + (targetH * 0.75) * targetW) * 4,
+          Math.floor((targetW * 0.75) + (targetH * 0.75) * targetW) * 4,
+        ];
+        const isSolidGreen = samplePoints.every((idx) => {
+          const r = imgData[idx];
+          const g = imgData[idx + 1];
+          const b = imgData[idx + 2];
+          return g > 150 && r < 60 && b < 60;
+        });
+        setIsDroidCamGreenScreen(isSolidGreen);
+      } catch {
+        // Ignore sampling errors
+      }
+
       const frameBase64 = offscreen.toDataURL("image/jpeg", 0.55);
 
       const nowMs = Date.now();
@@ -1170,6 +1210,64 @@ export const DetectorPage: React.FC = () => {
                       </div>
                     </div>
                   )}
+
+                  {/* DroidCam Green Screen Detection Overlay Card */}
+                  {isStreaming && isDroidCamGreenScreen && (
+                    <div className="absolute inset-0 bg-ink-950/85 backdrop-blur-sm z-20 flex flex-col items-center justify-center p-4 text-center">
+                      <div className="max-w-lg bg-bg-surface text-ink-900 border-2 border-sev-medium rounded-lg p-5 shadow-2xl space-y-4">
+                        <div className="flex items-center justify-center gap-2 text-sev-medium">
+                          <AlertTriangle className="w-6 h-6 text-sev-medium shrink-0" />
+                          <h4 className="text-h4 font-bold text-ink-900">
+                            DroidCam Green Screen Detected
+                          </h4>
+                        </div>
+                        <p className="text-small text-ink-700 leading-relaxed">
+                          Your phone is connected via DroidCam, but the video feed is showing a standby green screen. Follow these 3 quick steps:
+                        </p>
+
+                        <div className="text-left bg-primary-50/70 border border-primary-200 rounded p-3 space-y-2 text-small text-ink-900">
+                          <div className="flex items-start gap-2">
+                            <span className="font-bold text-primary-700 shrink-0">1.</span>
+                            <span><strong>Phone Screen:</strong> Unlock your phone and ensure the <strong>DroidCam app is open on screen</strong> (do not lock or minimize).</span>
+                          </div>
+                          <div className="flex items-start gap-2">
+                            <span className="font-bold text-primary-700 shrink-0">2.</span>
+                            <span><strong>DroidCam PC Client:</strong> In the DroidCam Client window on your laptop, click <strong>Stop</strong> then <strong>Start</strong> to refresh the link.</span>
+                          </div>
+                          <div className="flex items-start gap-2">
+                            <span className="font-bold text-primary-700 shrink-0">3.</span>
+                            <span><strong>Chrome Hardware Acceleration:</strong> If video is visible in the PC Client but green in Chrome, open <code className="bg-slate-200 px-1 py-0.5 rounded text-caption font-mono">chrome://settings/system</code>, toggle <strong>OFF</strong> <em>&quot;Use graphics acceleration when available&quot;</em>, and relaunch Chrome.</span>
+                          </div>
+                        </div>
+
+                        <div className="pt-2 flex flex-wrap items-center justify-center gap-3">
+                          <Button
+                            variant="primary"
+                            size="sm"
+                            onClick={() => {
+                              stopCamera();
+                              setActiveTab("ipcam");
+                              setIsIpStreaming(true);
+                            }}
+                            leftIcon={<Wifi className="w-4 h-4" />}
+                          >
+                            Switch to Direct Wi-Fi IP Stream
+                          </Button>
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={() => {
+                              setIsDroidCamGreenScreen(false);
+                              startCamera();
+                            }}
+                            leftIcon={<RefreshCw className="w-4 h-4" />}
+                          >
+                            Retry Camera
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 {/* Bottom Viewport Control Toolbar */}
@@ -1324,17 +1422,35 @@ export const DetectorPage: React.FC = () => {
                       })}
                     </select>
 
-                    {/* DroidCam Quick Setup Instructions */}
+                    {/* DroidCam Quick Setup & Green Screen Troubleshooting */}
                     <details className="text-caption text-text-muted bg-bg-page border border-border-default rounded p-3 select-none">
-                      <summary className="font-medium text-ink-800 hover:text-primary-600 cursor-pointer flex items-center gap-1.5">
-                        <Smartphone className="w-3.5 h-3.5 text-primary-600" />
-                        <span>Using DroidCam? Quick setup steps</span>
+                      <summary className="font-medium text-ink-800 hover:text-primary-600 cursor-pointer flex items-center justify-between">
+                        <div className="flex items-center gap-1.5">
+                          <Smartphone className="w-3.5 h-3.5 text-primary-600" />
+                          <span>Using DroidCam? Quick setup &amp; Green Screen fix</span>
+                        </div>
+                        <span className="text-xs text-primary-600 font-normal">View steps</span>
                       </summary>
-                      <div className="mt-2.5 space-y-1.5 pl-3 border-l-2 border-primary-600 text-ink-800">
+                      <div className="mt-2.5 space-y-2 pl-3 border-l-2 border-primary-600 text-ink-800">
                         <p>1. Open <strong>DroidCam</strong> on your Android / iOS phone.</p>
-                        <p>2. Open <strong>DroidCam Client</strong> on this PC (installed &amp; running).</p>
-                        <p>3. Enter your phone&apos;s Wi-Fi IP and click <strong>Start</strong> in DroidCam Client.</p>
-                        <p>4. Click <strong>&quot;Scan for DroidCam&quot;</strong> above &mdash; <strong>DroidCam Video</strong> will stream immediately!</p>
+                        <p>2. Open <strong>DroidCam Client</strong> on this PC.</p>
+                        <p>3. Enter your phone&apos;s Wi-Fi IP (<code className="bg-slate-100 px-1 rounded font-mono">192.168.29.8</code>) and click <strong>Start</strong> in DroidCam Client.</p>
+                        <p>4. In the camera dropdown above, select <strong>DroidCam Video</strong>.</p>
+                        <div className="pt-1.5 border-t border-border-default/60 space-y-1">
+                          <span className="font-semibold text-sev-medium flex items-center gap-1">
+                            <AlertTriangle className="w-3 h-3 text-sev-medium" />
+                            Fixing Solid Green Screen:
+                          </span>
+                          <p className="text-caption text-ink-700">
+                            &bull; <strong>Keep phone awake:</strong> If your phone screen sleeps or minimizes DroidCam, the driver outputs pure green. Keep the app open on screen.
+                          </p>
+                          <p className="text-caption text-ink-700">
+                            &bull; <strong>Restart PC Client stream:</strong> Click <em>Stop</em> then <em>Start</em> in the DroidCam Client window.
+                          </p>
+                          <p className="text-caption text-ink-700">
+                            &bull; <strong>Chrome GPU Acceleration:</strong> In Chrome, open <code className="bg-slate-100 px-1 rounded font-mono">chrome://settings/system</code> &rarr; toggle <em>&quot;Use graphics acceleration when available&quot;</em> to <strong>OFF</strong> &rarr; click <strong>Relaunch</strong>.
+                          </p>
+                        </div>
                       </div>
                     </details>
                   </div>
